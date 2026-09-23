@@ -851,6 +851,15 @@ int x25_accept(x25_vc *vc, int fd, int max_pkt, int max_win, int timeout_ms,
     vc->timeout_ms = timeout_ms;
     buf_init(&rx);
 
+    /* X.25 packets are small and window-paced: with Nagle, a packet
+     * waits for the peer's (delayed) ACK of the previous one, which
+     * costs ~40 ms per window on Linux */
+    int one = 1;
+    setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
+#ifdef SO_NOSIGPIPE
+    setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof one);
+#endif
+
     for (;;) {
         if (read_pkt(vc, &rx, timeout_ms) < 0) {
             buf_free(&rx);
