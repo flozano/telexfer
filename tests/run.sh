@@ -250,11 +250,112 @@ generic_tests() {
     run "NBS-9 entries in octet-aligned PDVs" 0 ls lsdir
     check "  names" cmp -s "$WORK/ls.expected" "$WORK/t$N.out"
 
+    # ---- collect: rotating sequence, as a switch presents billing files ----
+    collect_tests
+
     start_server -w secret
     run "password accepted" 0 -u alice -p secret ping
     run "wrong password rejects association" 1 -u alice -p wrong ping
     check "  diagnostic 2020" grep -q "error 2020" "$WORK/t$N.err"
 
+}
+
+# ---- collect -------------------------------------------------------------------
+# mk_ama DIR SEQ CONTENT TIME: a file as the switch would write it, with the
+# time touch(1) takes (creation/modification time on the responder)
+mk_ama() {
+    printf '%s' "$3" >"$SRV/$1/AMA000$2"
+    touch -t "$4" "$SRV/$1/AMA000$2"
+}
+ncollected() { grep -c '^collected ' "$WORK/t$N.out"; }
+local_content() { cat "$D"/AMA000"$1".* 2>/dev/null | tr '\n' ' '; }
+
+collect_tests() {
+    D=$WORK/coll-$TRANSPORT
+    mkdir -p "$SRV/ama" "$D"
+    mk_ama ama 1 one   202601010001
+    mk_ama ama 2 two   202601010002
+    mk_ama ama 3 three 202601010003
+    C=(collect --name ama/AMA%04d --seq-range 1-5 --dest "$D")
+    start_server
+    run "collect: no state and no --start" 1 "${C[@]}"
+    check "  asks for --start" grep -q "give --start" "$WORK/t$N.err"
+    run "collect: first poll" 0 "${C[@]}" --start 1
+    check "  1 and 2 collected, 3 still being written" \
+        bash -c "[ \$(grep -c '^collected ' '$WORK/t$N.out') = 2 ] && ! grep -q 'seq=3' '$WORK/t$N.out'"
+    check "  content on disk" bash -c "[ \"\$(cat '$D'/AMA0001.*)\" = one ]"
+    run "collect: nothing new" 0 "${C[@]}"
+    check "  nothing collected twice" bash -c "! grep -q '^collected' '$WORK/t$N.out'"
+    mk_ama ama 4 four 202601010004
+    run "collect: 3 once 4 follows" 0 "${C[@]}"
+    check "  only 3" bash -c "grep -q 'seq=3 ' '$WORK/t$N.out' && [ \$(grep -c '^collected ' '$WORK/t$N.out') = 1 ]"
+    mk_ama ama 5 five 202601010005
+    run "collect: 5 waits: the 1 after it is last cycle's" 0 "${C[@]}"
+    check "  only 4" bash -c "grep -q 'seq=4 ' '$WORK/t$N.out' && [ \$(grep -c '^collected ' '$WORK/t$N.out') = 1 ]"
+    mk_ama ama 1 one-b 202601010006
+    run "collect: wrap: new 1 closes 5" 0 "${C[@]}"
+    check "  only 5" bash -c "grep -q 'seq=5 ' '$WORK/t$N.out' && [ \$(grep -c '^collected ' '$WORK/t$N.out') = 1 ]"
+    mk_ama ama 2 two-b 202601010007
+    run "collect: new 1 after the wrap" 0 "${C[@]}"
+    check "  both generations kept locally" \
+        bash -c "[ \$(ls '$D' | grep -c '^AMA0001\\.') = 2 ] && cat '$D'/AMA0001.* | grep -q one-b"
+    check "  state: next is 2" grep -q "^next 2$" "$D/.telexfer-state"
+    # 3 is skipped by the switch in this cycle: 4 and 5 arrive, 3 stays old
+    mk_ama ama 4 four-b 202601010008
+    mk_ama ama 5 five-b 202601010009
+    run "collect: gap detected" 3 "${C[@]}"
+    check "  gap at 3 reported" grep -q "^gap seq=3 " "$WORK/t$N.out"
+    check "  2 and 4 collected past the gap" \
+        bash -c "grep -q 'seq=2 ' '$WORK/t$N.out' && grep -q 'seq=4 ' '$WORK/t$N.out'"
+    check "  5 still being written" bash -c "! grep -q 'seq=5 ' '$WORK/t$N.out'"
+
+    # another poll holds the lock
+    python3 -c 'import fcntl, sys, time
+f = open(sys.argv[1], "w"); fcntl.flock(f, fcntl.LOCK_EX); time.sleep(5)' \
+        "$D/.telexfer-state.lock" &
+    local holder=$!
+    sleep 0.5
+    SKIP_TSHARK=1 run "collect: overlapping poll refused" 4 "${C[@]}"
+    check "  says why" grep -q "another collect is running" "$WORK/t$N.err"
+    kill $holder 2>/dev/null; wait $holder 2>/dev/null
+
+    # acknowledgement by delete and by rename
+    for ack in delete rename; do
+        mkdir -p "$SRV/ack-$ack" "$WORK/coll-$TRANSPORT-$ack"
+        mk_ama ack-$ack 1 a 202601020001
+        mk_ama ack-$ack 2 b 202601020002
+        mk_ama ack-$ack 3 c 202601020003
+        run "collect: --ack $ack" 0 collect --name ack-$ack/AMA%04d --seq-range 1-9 \
+            --dest "$WORK/coll-$TRANSPORT-$ack" --start 1 --ack $ack
+        check "  1 and 2 collected" bash -c "[ \$(grep -c '^collected ' '$WORK/t$N.out') = 2 ]"
+        if [ $ack = delete ]; then
+            check "  removed from the switch" \
+                test ! -e "$SRV/ack-$ack/AMA0001" -a ! -e "$SRV/ack-$ack/AMA0002" -a -e "$SRV/ack-$ack/AMA0003"
+        else
+            check "  renamed on the switch" \
+                test -e "$SRV/ack-$ack/AMA0001.DONE" -a -e "$SRV/ack-$ack/AMA0002.DONE" -a ! -e "$SRV/ack-$ack/AMA0001"
+        fi
+    done
+
+    # a switch that reports no times
+    mkdir -p "$SRV/notime" "$WORK/coll-$TRANSPORT-notime"
+    mk_ama notime 1 x 202601030001
+    mk_ama notime 2 y 202601030002
+    mk_ama notime 3 z 202601030003
+    NC=(collect --name notime/AMA%04d --seq-range 1-3 --dest "$WORK/coll-$TRANSPORT-notime")
+    start_server -G
+    run "collect: no times and --closed next refuses" 1 "${NC[@]}" --start 1
+    check "  explains why" grep -q "no creation or modification time" "$WORK/t$N.err"
+    run "collect: no times, --closed any" 0 "${NC[@]}" --start 1 --closed any
+    check "  all three collected, then the sequence wraps" bash -c \
+        "[ \$(grep -c '^collected ' '$WORK/t$N.out') = 3 ] && grep -q '^next 1\$' '$WORK/coll-$TRANSPORT-notime/.telexfer-state'"
+    # a poll visits each sequence number at most once, so the wrapped-around
+    # files are only looked at by the next one
+    printf 'x2' >"$SRV/notime/AMA0001"
+    run "collect: no times, rewritten file is new, old one is not" 0 -v "${NC[@]}" --closed any
+    check "  only the new 1 collected" \
+        bash -c "grep -q 'seq=1 ' '$WORK/t$N.out' && [ \$(grep -c '^collected ' '$WORK/t$N.out') = 1 ]"
+    check "  2 recognised by SHA-256 as last cycle's" grep -q "AMA0002 is last cycle's file" "$WORK/t$N.err"
 }
 
 # ---- X.25 only ------------------------------------------------------------------

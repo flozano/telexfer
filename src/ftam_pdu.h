@@ -132,6 +132,7 @@ enum { SS_VARIABLE = 0, SS_FIXED = 1, SS_NOT_SIGNIFICANT = 2 };
 #define AN_PATHNAME         (1u << 0)
 #define AN_PERMITTED        (1u << 1)
 #define AN_CONTENTS_TYPE    (1u << 2)
+#define AN_CREATED          (1u << 4)
 #define AN_MODIFIED         (1u << 5)
 #define AN_SIZE             (1u << 13)
 #define AN_OBJECT_TYPE      (1u << 18)          /* version 2 */
@@ -152,6 +153,7 @@ typedef struct {
     char      name[512];
     int       is_dir;           /* object-type file-directory, or NBS-9 */
     long long size;             /* -1 unknown */
+    char      ctime[32];        /* creation, GeneralizedTime, "" unknown */
     char      mtime[32];        /* GeneralizedTime as sent, "" unknown */
     int       doctype;
 } ftam_dirent;
@@ -176,6 +178,8 @@ void ftam_enc_diagnostic(ber_enc *e, int type, int id, int observer,
 /* Format all Diagnostic entries found in PDU into buf; returns count. */
 int  ftam_fmt_diagnostic(const ber_tlv *pdu, char *out, size_t max);
 const char *ftam_error_str(long id);
+/* error-identifier of the first Diagnostic entry in a PDU, -1 if none */
+long ftam_first_diag_id(const ber_tlv *pdu);
 
 /*
  * Check state-result/action-result of a response PDU.  Returns 0 if both

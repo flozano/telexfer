@@ -301,6 +301,19 @@ int ftam_fmt_diagnostic(const ber_tlv *pdu, char *out, size_t max)
     return count;
 }
 
+long ftam_first_diag_id(const ber_tlv *pdu)
+{
+    ber_tlv diag, ent, id;
+    ber_rd  r;
+    long    v = -1;
+    if (!ber_find(pdu, FT_DIAGNOSTIC, &diag))
+        return -1;
+    ber_enter(&diag, &r);
+    if (ber_next(&r, &ent) > 0 && ber_find(&ent, T_CTX(1), &id))
+        ber_get_int(&id, &v);
+    return v;
+}
+
 int ftam_check_result(const ber_tlv *pdu, const char *what)
 {
     ber_tlv t;
@@ -427,12 +440,14 @@ int ftam_parse_dirent(const ber_tlv *attrs, ftam_dirent *e)
                 if (ct.doctype == 9)
                     e->is_dir = 1;
             }
-        } else if ((n == 5 || n == 13) && T_CONSTRUCTED(f.tag)) {
+        } else if ((n == 4 || n == 5 || n == 13) && T_CONSTRUCTED(f.tag)) {
             ber_rd ar;
             ber_enter(&f, &ar);
             if (ber_next(&ar, &in) <= 0 || (in.tag == T_CTX(0) && in.len == 0))
                 continue;                       /* no value available */
-            if (n == 5) {
+            if (n == 4) {
+                ber_get_cstr(&in, e->ctime, sizeof e->ctime);
+            } else if (n == 5) {
                 ber_get_cstr(&in, e->mtime, sizeof e->mtime);
             } else {
                 long v;

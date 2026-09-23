@@ -329,6 +329,7 @@ typedef struct {
     int     got[64];
     int     ok[64];
     char    err[1024];
+    long    err_id;             /* ISO 8571 error of the first failure */
     resp_fn on_resp;
     void   *arg;
 } group_res;
@@ -339,8 +340,10 @@ static void note_result(group_res *gr, unsigned tag, const ber_tlv *pdu)
         return;
     gr->got[tag] = 1;
     gr->ok[tag] = ftam_check_result(pdu, ftam_pdu_name(tag - 1)) == 0;
-    if (!gr->ok[tag] && !gr->err[0])
+    if (!gr->ok[tag] && !gr->err[0]) {
         snprintf(gr->err, sizeof gr->err, "%s", get_error());
+        gr->err_id = ftam_first_diag_id(pdu);
+    }
     if (gr->ok[tag] && gr->on_resp)
         gr->on_resp(gr->arg, tag, pdu);
 }
@@ -359,6 +362,7 @@ static int run_group(ftam_conn *fc, buf_t *reqs, int n, group_res *gr)
     memset(gr->got, 0, sizeof gr->got);
     memset(gr->ok, 0, sizeof gr->ok);
     gr->err[0] = 0;
+    gr->err_id = -1;
 
     if (fc->fu & FU_GROUPING) {
         buf_t   b;
@@ -1209,6 +1213,75 @@ int ftam_rename(ftam_conn *fc, const char *from, const char *to)
     if (rc == -1 && gr.ok[F_SELECT_RP] && !gr.ok[F_DESELECT_RP])
         deselect(fc);
     return rc < 0 ? -1 : 0;
+}
+
+/* ---- file status ---------------------------------------------------------- */
+
+static int stat_resp(void *arg, unsigned tag, const ber_tlv *pdu)
+{
+    ftam_dirent *e = arg;
+    ber_tlv      attrs;
+    if (tag == F_READ_ATTRIB_RP && ber_find(pdu, FT_READ_ATTRS, &attrs))
+        ftam_parse_dirent(&attrs, e);
+    return 0;
+}
+
+int ftam_stat(ftam_conn *fc, const char *remote, ftam_dirent *info)
+{
+    group_res gr = { .on_resp = stat_resp, .arg = info };
+    buf_t     sel, rd, des;
+
+    memset(info, 0, sizeof *info);
+    info->size = -1;
+    if (!fc->associated) {
+        set_error("not associated");
+        return -1;
+    }
+    if (!(fc->fu & FU_LIMITED_MGMT)) {
+        /* no F-READ-ATTRIB without limited file management: selecting
+         * the file still tells whether it exists (no size, no dates) */
+        buf_init(&sel);
+        buf_init(&des);
+        pdu_select(&sel, remote, AR_READ);
+        pdu_simple(&des, F_DESELECT_RQ);
+        int rc = group3(fc, &gr, &sel, &des, NULL);
+        buf_free(&sel);
+        buf_free(&des);
+        if (rc == -2)
+            return -1;
+        if (!gr.ok[F_SELECT_RP])
+            return (gr.err_id == 3000 || gr.err_id == 3001 || gr.err_id == 3004) ? 1 : -1;
+        snprintf(info->name, sizeof info->name, "%s", remote);
+        return 0;
+    }
+    uint32_t names = AN_PATHNAME;
+    if (fc->attr_groups & AG_STORAGE)
+        names |= AN_CREATED | AN_MODIFIED | AN_SIZE;
+    buf_init(&sel);
+    buf_init(&rd);
+    buf_init(&des);
+    pdu_select(&sel, remote, AR_READ_ATTR);
+    pdu_read_attrib(&rd, names);
+    pdu_simple(&des, F_DESELECT_RQ);
+    int rc = group3(fc, &gr, &sel, &rd, &des);
+    buf_free(&sel);
+    buf_free(&rd);
+    buf_free(&des);
+    if (rc == -2)
+        return -1;
+    if (!gr.ok[F_SELECT_RP]) {
+        /* "no such file" diagnostics mean absent; anything else is an error */
+        if (gr.err_id == 3000 || gr.err_id == 3001 || gr.err_id == 3004)
+            return 1;
+        return -1;
+    }
+    if (rc == -1 && !gr.ok[F_DESELECT_RP])
+        deselect(fc);
+    if (!gr.ok[F_READ_ATTRIB_RP])
+        return -1;
+    if (!info->name[0])
+        snprintf(info->name, sizeof info->name, "%s", remote);
+    return 0;
 }
 
 /* ---- directory listing -------------------------------------------------- */

@@ -98,6 +98,10 @@ int  ftam_put(ftam_conn *fc, FILE *in, const char *remote, int doctype,
 int  ftam_delete(ftam_conn *fc, const char *remote);
 int  ftam_attributes(ftam_conn *fc, const char *remote, FILE *out);
 int  ftam_rename(ftam_conn *fc, const char *from, const char *to);
+/* Attributes of one file: 0 exists (info filled), 1 does not exist,
+ * -1 error.  Creation/modification time and size need the storage
+ * attribute group. */
+int  ftam_stat(ftam_conn *fc, const char *remote, ftam_dirent *info);
 /*
  * List a directory (dir may be NULL: the responder's current directory).
  * LIST_FLIST uses F-LIST (FTAM version 2, limited filestore management),

@@ -7,12 +7,12 @@ override CFLAGS += -std=c11 -D_DEFAULT_SOURCE -D_DARWIN_C_SOURCE -D_POSIX_C_SOUR
 LDFLAGS ?=
 
 LIB_SRCS = src/util.c src/ber.c src/trace.c src/tcp.c src/x25.c src/rfc1006.c \
-           src/tp0.c src/session.c src/pres.c src/ftam_pdu.c
+           src/tp0.c src/session.c src/pres.c src/ftam_pdu.c src/sha256.c
 LIB_OBJS = $(LIB_SRCS:.c=.o)
 
 all: ftam ftamd
 
-ftam: $(LIB_OBJS) src/ftam.o src/main.o
+ftam: $(LIB_OBJS) src/ftam.o src/collect.o src/main.o
 	$(CC) $(LDFLAGS) -o $@ $^
 
 # minimal FTAM responder used by the test suite

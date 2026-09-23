@@ -8,8 +8,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
+#include "collect.h"
 #include "ftam.h"
 
 static void usage(FILE *f)
@@ -25,6 +27,7 @@ static void usage(FILE *f)
 "  rename <old> <new>       rename a remote file\n"
 "  ls [dir]                 list a remote directory (names)\n"
 "  dir [dir]                list with type, size and modification time\n"
+"  collect                  poll rotating-sequence files (billing/CDR style)\n"
 "  ping                     establish and release an FTAM association\n"
 "\n"
 "Network:\n"
@@ -94,6 +97,21 @@ static void usage(FILE *f)
 "      --list-method M      ls/dir: auto (default: F-LIST if the responder\n"
 "                           grants FTAM version 2, else NBS-9), flist, nbs9\n"
 "\n"
+"Collect (files named with a constant plus a rotating sequence number):\n"
+"      --name FMT           remote name, one %d for the sequence (AMA%04d)\n"
+"      --seq-range MIN-MAX  sequence numbers; after MAX comes MIN again\n"
+"      --state FILE         collection state (default DEST/.telexfer-state)\n"
+"      --dest DIR           where collected files go (default .)\n"
+"      --start N            first sequence number, when there is no state yet\n"
+"      --ack A              after collecting: none (default), delete, rename\n"
+"      --ack-rename FMT     new name for --ack rename, %s = old (%s.DONE)\n"
+"      --closed C           next (default): a file is finished when a newer\n"
+"                           one follows; any: every file shown is finished\n"
+"      --lookahead N        sequence numbers checked past a gap (default 3)\n"
+"      --max N              files per poll (default no limit)\n"
+"  exit codes: 0 ok, 1 error, 3 gap detected, 4 another collect running,\n"
+"  5 acknowledgement failed (files are collected and recorded)\n"
+"\n"
 "General:\n"
 "      --timeout SEC        receive timeout (default 60)\n"
 "      --pcap FILE          write the XOT session to a pcap file\n"
@@ -108,11 +126,23 @@ enum {
     O_REJ, O_DBIT, O_INTERRUPT, O_TSDU, O_OCTET, O_T25,
     O_PDVENC, O_ACSEENC, O_PDVSEG, O_RXBUF, O_QDATA, O_EXTCONCAT,
     O_LISTMETHOD, O_TRANSPORT,
+    O_CNAME, O_CRANGE, O_CSTATE, O_CDEST, O_CSTART, O_CACK, O_CACKREN,
+    O_CCLOSED, O_CLOOK, O_CMAX,
 };
 
 static const struct option longopts[] = {
     { "host", required_argument, NULL, 'H' },
     { "transport", required_argument, NULL, O_TRANSPORT },
+    { "name", required_argument, NULL, O_CNAME },
+    { "seq-range", required_argument, NULL, O_CRANGE },
+    { "state", required_argument, NULL, O_CSTATE },
+    { "dest", required_argument, NULL, O_CDEST },
+    { "start", required_argument, NULL, O_CSTART },
+    { "ack", required_argument, NULL, O_CACK },
+    { "ack-rename", required_argument, NULL, O_CACKREN },
+    { "closed", required_argument, NULL, O_CCLOSED },
+    { "lookahead", required_argument, NULL, O_CLOOK },
+    { "max", required_argument, NULL, O_CMAX },
     { "called", required_argument, NULL, 'A' },
     { "calling", required_argument, NULL, 'a' },
     { "cud", required_argument, NULL, O_CUD },
@@ -226,6 +256,10 @@ int main(int argc, char **argv)
     int       doctype = 3, force = 0, append = 0, c;
     int       list_method = LIST_AUTO;
     int       port_given = 0;
+    collect_opts co = { .seq_min = -1, .start = -1, .dest = ".",
+                        .ack = ACK_NONE, .ack_rename = "%s.DONE",
+                        .closed = CLOSED_NEXT, .lookahead = 3 };
+    char      range_arg[64] = "";
     const char *x25_opt = NULL;
     char     *hostarg = NULL;
 
@@ -245,6 +279,31 @@ int main(int argc, char **argv)
             x25_opt = x25_only_opt(c);
         switch (c) {
         case 'H': hostarg = optarg; break;
+        case O_CNAME: co.name_fmt = optarg; break;
+        case O_CRANGE: snprintf(range_arg, sizeof range_arg, "%s", optarg); break;
+        case O_CSTATE: co.state_path = optarg; break;
+        case O_CDEST: co.dest = optarg; break;
+        case O_CSTART: co.start = num_arg("--start", optarg, 0, 999999999); break;
+        case O_CACK:
+            if (strcmp(optarg, "none") == 0) co.ack = ACK_NONE;
+            else if (strcmp(optarg, "delete") == 0) co.ack = ACK_DELETE;
+            else if (strcmp(optarg, "rename") == 0) co.ack = ACK_RENAME;
+            else {
+                fprintf(stderr, "ftam: --ack must be none, delete or rename\n");
+                return 2;
+            }
+            break;
+        case O_CACKREN: co.ack_rename = optarg; break;
+        case O_CCLOSED:
+            if (strcmp(optarg, "next") == 0) co.closed = CLOSED_NEXT;
+            else if (strcmp(optarg, "any") == 0) co.closed = CLOSED_ANY;
+            else {
+                fprintf(stderr, "ftam: --closed must be next or any\n");
+                return 2;
+            }
+            break;
+        case O_CLOOK: co.lookahead = (int)num_arg("--lookahead", optarg, 1, 100); break;
+        case O_CMAX: co.max_files = (int)num_arg("--max", optarg, 1, 1000000); break;
         case O_TRANSPORT:
             if (strcmp(optarg, "xot") == 0)
                 o.transport = TRANSPORT_XOT;
@@ -405,7 +464,7 @@ int main(int argc, char **argv)
     struct { const char *name; int min, max; } cmds[] = {
         { "get", 1, 2 }, { "put", 1, 2 }, { "delete", 1, 1 },
         { "attr", 1, 1 }, { "rename", 2, 2 }, { "ping", 0, 0 },
-        { "ls", 0, 1 }, { "dir", 0, 1 },
+        { "ls", 0, 1 }, { "dir", 0, 1 }, { "collect", 0, 0 },
     };
     int known = 0;
     for (size_t i = 0; i < sizeof cmds / sizeof cmds[0]; i++)
@@ -463,6 +522,52 @@ int main(int argc, char **argv)
     if (listing && list_method != LIST_NBS9)
         o.propose_v2 = 1;
 
+    int collecting = strcmp(cmd, "collect") == 0;
+    int lock_fd = -1;
+    static char state_default[4096];
+    if (collecting) {
+        char *dash;
+        if (!co.name_fmt || !range_arg[0]) {
+            fprintf(stderr, "ftam: collect needs --name and --seq-range\n");
+            return 2;
+        }
+        if (collect_check_format(co.name_fmt) < 0) {
+            fprintf(stderr, "ftam: %s\n", get_error());
+            return 2;
+        }
+        co.seq_min = strtol(range_arg, &dash, 10);
+        if (*dash != '-' || (co.seq_max = strtol(dash + 1, &dash, 10), *dash) ||
+            co.seq_min < 0 || co.seq_max < co.seq_min ||
+            co.seq_max - co.seq_min >= 10000000) {
+            fprintf(stderr, "ftam: --seq-range must be MIN-MAX (at most 10 million)\n");
+            return 2;
+        }
+        if (co.start >= 0 && (co.start < co.seq_min || co.start > co.seq_max)) {
+            fprintf(stderr, "ftam: --start is outside --seq-range\n");
+            return 2;
+        }
+        if (co.ack == ACK_RENAME && !strstr(co.ack_rename, "%s")) {
+            fprintf(stderr, "ftam: --ack-rename needs %%s for the original name\n");
+            return 2;
+        }
+        struct stat sb;
+        if (stat(co.dest, &sb) != 0 || !S_ISDIR(sb.st_mode)) {
+            fprintf(stderr, "ftam: --dest %s is not a directory\n", co.dest);
+            return 2;
+        }
+        if (!co.state_path) {
+            snprintf(state_default, sizeof state_default, "%s/.telexfer-state", co.dest);
+            co.state_path = state_default;
+        }
+        /* lock before connecting: an overlapping poll costs no call */
+        int busy;
+        lock_fd = collect_lock(&co, &busy);
+        if (lock_fd < 0) {
+            fprintf(stderr, "ftam: %s\n", get_error());
+            return busy ? COLLECT_BUSY : 1;
+        }
+    }
+
     signal(SIGPIPE, SIG_IGN);
 
     ftam_conn fc;
@@ -502,6 +607,17 @@ int main(int argc, char **argv)
         rc = ftam_attributes(&fc, argv[1], stdout);
     } else if (strcmp(cmd, "rename") == 0) {
         rc = ftam_rename(&fc, argv[1], argv[2]);
+    } else if (collecting) {
+        int crc = ftam_collect(&fc, &co);
+        if (crc != COLLECT_OK && crc != COLLECT_ERROR) {
+            /* gap / ack failure: not an error of the association */
+            ftam_release(&fc);
+            ftam_close(&fc);
+            fprintf(stderr, "ftam: collect finished with %s\n",
+                    crc == COLLECT_GAP ? "a sequence gap" : "failed acknowledgements");
+            return crc;
+        }
+        rc = crc == COLLECT_OK ? 0 : -1;
     } else if (listing) {
         rc = ftam_list(&fc, nargs ? argv[1] : NULL, list_method,
                        strcmp(cmd, "dir") == 0, stdout);

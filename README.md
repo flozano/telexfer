@@ -106,6 +106,70 @@ session data overflow procedure (CN + OA + CDO).
   decodes every layer up to FTAM, from XOT or from TPKT. On a port other
   than 1998 or 102, add `-d tcp.port==PORT,xot` or `-d tcp.port==PORT,tpkt`.
 
+## Collecting billing files (`collect`)
+
+`collect` polls a responder for files named with a constant prefix plus a
+rotating sequence number, e.g. `AMA0001` … `AMA9999`, then `AMA0001` again.
+Switches such as a 5ESS present their AMA/CDR files this way. Run it from
+cron or a systemd timer:
+
+```sh
+ftam --transport rfc1006 -H switch.example --tsel … --ssel … --psel … \
+     -u USER collect --name AMA%04d --seq-range 1-9999 \
+     --dest /var/spool/cdr/switch1 [--start 1] [--ack none|delete|rename]
+```
+
+Each run collects every finished file since the last one, in sequence order.
+It prints one line per file for reconciliation:
+
+```
+collected seq=17 name=AMA0017 size=204800 time=20260924T031000Z sha256=… local=…/AMA0017.20260924T031000Z
+gap seq=18 name=AMA0018
+```
+
+**How it decides.** The switch usually keeps its files and overwrites them
+in rotation (`--ack none`, the default), so a name alone says nothing:
+
+- **Generation.** A file at the next sequence number is new only if it is
+  not older than the last one collected, using its creation time (or its
+  modification time). Otherwise it is last cycle's file. A per-sequence
+  SHA-256 of what was collected is the second check.
+- **Finished.** A file counts as done once a newer file exists further
+  along the sequence (up to `--lookahead` places), because then the switch
+  has moved on. Under rotation the following name always exists, so
+  "newer" matters.
+- **No times.** If the switch reports neither creation nor modification
+  time, neither rule can work. `collect` then refuses, unless you assert
+  with `--closed any` that the switch only shows finished files. The
+  SHA-256 check alone then catches last cycle's files.
+- **Gaps.** A missing (or stale) sequence number with a newer file after it
+  is reported as a `gap` line and exit code 3. Collection carries on, so
+  one lost file doesn't hold up everything behind it.
+
+**Nothing is lost or taken twice.**
+1. Each file is downloaded to a temp file, `fsync`ed, and its size checked
+   against the switch's.
+2. It is renamed into place. Local names carry the file's time, so a wrap
+   never overwrites an earlier file.
+3. The state file (default `DEST/.telexfer-state`) is rewritten atomically.
+   That write is the commit point.
+4. Only then is the file acknowledged on the switch (`--ack delete`, or
+   `--ack rename`, default new name `%s.DONE`).
+
+A crash at any point is safe on the next run. A file already on disk with
+the same SHA-256 is not stored twice. A failed acknowledgement is reported
+(`ack-failed` line, exit code 5) and never undone. A lock taken before
+dialling keeps overlapping runs apart (exit code 4). The first run needs
+`--start`.
+
+**What is not verified yet** against a real 5ESS: whether it reports
+creation/modification times through F-READ-ATTRIB, the exact file names,
+and whether reading attributes needs a service class or functional unit it
+doesn't grant. Without *limited file management*, `collect` falls back to an
+existence check (select/deselect), which means no times, so `--closed any`.
+The first session against the switch with `-vv --pcap` will answer all of
+this.
+
 ## Protocol behaviour
 
 - **Association.**
@@ -233,6 +297,13 @@ The optional procedures are covered too:
   announced it)
 - arbitrary PDVs sent and received
 - segmented octet-aligned and arbitrary user-information in both directions
+- `collect` over both transports:
+  - first poll, nothing new, a file closed by the next one
+  - a file held back because the name after it is last cycle's
+  - the wrap and both generations kept on disk
+  - a gap, the overlapping-run lock, `--ack delete` and `--ack rename`
+  - a responder without times (`ftamd -G`): refusal, `--closed any`, and
+    SHA-256 recognising last cycle's file
 - directory listing via F-LIST (auto and forced) and NBS-9 (forced, as the
   fallback from a version-1-only responder `ftamd -L`, and with entries in
   octet-aligned PDVs), plus subdirectories, a missing directory, and F-LIST
@@ -260,7 +331,7 @@ to succeed, the decode must also contain FTAM. Otherwise a capture Wireshark
 couldn't parse would pass silently; adding this found exactly one such case,
 the one listed above. This is the check that does not depend on my own
 reading of the standards. It caught three wrong encodings in the test
-responder during development. All 233 checks also pass under ASan and UBSan,
+responder during development. All 303 checks also pass under ASan and UBSan,
 and CI runs both on Ubuntu.
 
 For directory listing, the F-LIST tags were not taken from memory. They

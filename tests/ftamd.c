@@ -36,6 +36,7 @@ typedef struct {
     int       ctx_acse, ctx_pci, ctx_text, ctx_bin, ctx_nbs9;
     uint32_t  version;          /* negotiated Protocol-Version bits */
     int       no_v2;            /* -L: refuse FTAM version 2 (no F-LIST) */
+    int       no_storage;       /* -G: no storage attributes (sizes, times) */
     uint32_t  nbs9_names;       /* attributes asked for when opening a dir */
     uint32_t  fu, attr_groups;
     /* regime state */
@@ -69,6 +70,7 @@ typedef struct {
     int         pdv_mode;       /* -O octet-aligned, -A arbitrary */
     int         ext_concat;     /* -X */
     int         no_v2;          /* -L */
+    int         no_storage;     /* -G */
     int         rfc1006;        /* -t rfc1006 */
     int         acse_encoding;  /* -E octet|arbitrary */
     size_t      segment;        /* -S */
@@ -639,6 +641,11 @@ static void do_read_attrib(srv_t *s, const ber_tlv *pdu)
     enc_ct(&e, s->doctype);
     ber_end(&e);
     if (s->attr_groups & AG_STORAGE) {
+        /* creation: the file's mtime, as a switch rewriting a file in
+         * rotation gives it a new creation time */
+        ber_begin(&e, T_CTXC(4));
+        ber_str(&e, T_CTX(1), tbuf);
+        ber_end(&e);
         ber_begin(&e, T_CTXC(5));               /* date of last modification */
         ber_str(&e, T_CTX(1), tbuf);
         ber_end(&e);
@@ -850,7 +857,7 @@ static int associate(srv_t *s)
     s->version = ((pv & PV_VERSION_2) && !s->no_v2) ? PV_VERSION_2 : PV_VERSION_1;
     s->fu = fu & (FU_READ | FU_WRITE | FU_LIMITED_MGMT | FU_ENHANCED_MGMT | FU_GROUPING |
                   (s->version == PV_VERSION_2 ? FU_LIMITED_FS : 0));
-    s->attr_groups = ag & AG_STORAGE;
+    s->attr_groups = s->no_storage ? 0 : ag & AG_STORAGE;
     int reject = s->password && strcmp(pw, s->password) != 0;
 
     buf_init(&finit);
@@ -906,6 +913,7 @@ static void serve(int fd, const char *dir, const char *password, const char *pca
     s.pdv_mode = so->pdv_mode;
     s.ext_concat = so->ext_concat;
     s.no_v2 = so->no_v2;
+    s.no_storage = so->no_storage;
     acse_set_user_encoding(so->acse_encoding);
     pres_set_segment(so->segment);
     s.tsdu_limit = so->tsdu_limit;
@@ -1028,7 +1036,7 @@ int main(int argc, char **argv)
     srv_opts    so;
 
     memset(&so, 0, sizeof so);
-    while ((c = getopt(argc, argv, "p:d:P:w:b:1vs:RD:OI:T:AE:S:N:B:Q:XLt:")) != -1) {
+    while ((c = getopt(argc, argv, "p:d:P:w:b:1vs:RD:OI:T:AE:S:N:B:Q:XLt:G")) != -1) {
         switch (c) {
         case 'p': port = atoi(optarg); break;
         case 'd': dir = optarg; break;
@@ -1049,6 +1057,7 @@ int main(int argc, char **argv)
         case 'N': so.hold_ms = atoi(optarg); break;
         case 'X': so.ext_concat = 1; break;
         case 'L': so.no_v2 = 1; break;
+        case 'G': so.no_storage = 1; break;
         case 't':
             if (strcmp(optarg, "rfc1006") == 0)
                 so.rfc1006 = 1;
@@ -1091,6 +1100,7 @@ int main(int argc, char **argv)
 "  -t T   transport: xot (default) or rfc1006 (TPKT over TCP); the\n"
 "         X.25 options (-R -D -T -N -B -Q -I) only apply to xot\n"
 "  -L     FTAM version 1 only: no F-LIST, directories via NBS-9\n"
+"  -G     refuse the storage attribute group (no sizes or times)\n"
 "  -X     test: send P-DATA as GT + MIP + DT (extended concatenation)\n"
 "         when the initiator announced it can receive that\n"
                 "  -O     send file data as octet-aligned PDVs\n"
