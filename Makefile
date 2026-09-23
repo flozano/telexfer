@@ -1,6 +1,8 @@
 CC      ?= cc
 CFLAGS  ?= -O2 -g
-CFLAGS  += -std=c11 -D_DEFAULT_SOURCE -D_DARWIN_C_SOURCE -D_POSIX_C_SOURCE=200809L \
+# 'override' keeps these when CFLAGS is given on the command line
+# (e.g. make CFLAGS="-O1 -fsanitize=address")
+override CFLAGS += -std=c11 -D_DEFAULT_SOURCE -D_DARWIN_C_SOURCE -D_POSIX_C_SOURCE=200809L \
            -Wall -Wextra -Wshadow -Wno-unused-parameter
 LDFLAGS ?=
 

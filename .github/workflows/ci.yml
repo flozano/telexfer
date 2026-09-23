@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: build and test
+            cflags: -O2 -g
+            ldflags: ""
+          - name: ASan + UBSan
+            cflags: -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer
+            ldflags: -fsanitize=address,undefined
+    env:
+      # the test suite keeps its work directory (pcaps, logs) on failure
+      TMPDIR: ${{ runner.temp }}
+      ASAN_OPTIONS: detect_leaks=0
+      UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install tshark and netcat
+        run: |
+          # tshark decodes every test capture as an independent check
+          echo "wireshark-common wireshark-common/install-setuid boolean false" |
+            sudo debconf-set-selections
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y tshark netcat-openbsd
+          tshark --version | head -1
+
+      - name: Build
+        run: make CFLAGS="${{ matrix.cflags }}" LDFLAGS="${{ matrix.ldflags }}"
+
+      - name: Test
+        run: ./tests/run.sh
+
+      - name: Keep test artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-artifacts-${{ strategy.job-index }}
+          path: ${{ runner.temp }}/ftamtest.*
+          if-no-files-found: ignore
