@@ -1,0 +1,5 @@
+ftam
+ftamd
+*.o
+*.pcap
+*.dSYM/
