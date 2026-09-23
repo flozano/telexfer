@@ -19,8 +19,6 @@ jobs:
             cflags: -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer
             ldflags: -fsanitize=address,undefined
     env:
-      # the test suite keeps its work directory (pcaps, logs) on failure
-      TMPDIR: ${{ runner.temp }}
       ASAN_OPTIONS: detect_leaks=0
       UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
     steps:
@@ -39,7 +37,8 @@ jobs:
         run: make CFLAGS="${{ matrix.cflags }}" LDFLAGS="${{ matrix.ldflags }}"
 
       - name: Test
-        run: ./tests/run.sh
+        # on failure the suite keeps its work directory (pcaps, logs) there
+        run: TMPDIR="$RUNNER_TEMP" ./tests/run.sh
 
       - name: Keep test artifacts
         if: failure()
