@@ -769,7 +769,8 @@ static int item_cb(void *arg, int ctx, const ber_tlv *v)
         buf_t str;
         buf_init(&str);
         ber_get_string(v, &str);
-        fwrite(str.data, 1, str.len, s->wf);
+        if (str.len)                /* empty line: data is NULL */
+            fwrite(str.data, 1, str.len, s->wf);
         if (ctx == s->ctx_text)
             fputc('\n', s->wf);
         buf_free(&str);

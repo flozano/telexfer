@@ -23,9 +23,14 @@ cleanup() {
 }
 trap cleanup EXIT
 
+SN=0
 start_server() {
     [ -n "$SRVPID" ] && kill "$SRVPID" 2>/dev/null && wait "$SRVPID" 2>/dev/null
-    ./ftamd -p "$PORT" -d "$SRV" "$@" -v >"$WORK/ftamd.log" 2>&1 &
+    # one log per responder instance, so a crash report is never
+    # overwritten; ftamd.log always names the current one
+    SN=$((SN + 1))
+    ln -sf "ftamd.$SN.log" "$WORK/ftamd.log"
+    ./ftamd -p "$PORT" -d "$SRV" "$@" -v >"$WORK/ftamd.$SN.log" 2>&1 &
     SRVPID=$!
     for _ in $(seq 50); do
         nc -z 127.0.0.1 "$PORT" 2>/dev/null && return
@@ -290,6 +295,13 @@ start_server -w secret
 run "password accepted" 0 -u alice -p secret ping
 run "wrong password rejects association" 1 -u alice -p wrong ping
 check "  diagnostic 2020" grep -q "error 2020" "$WORK/t$N.err"
+
+# a responder that died (e.g. a sanitizer report) only shows up as client
+# errors; make it explicit
+[ -n "$SRVPID" ] && kill "$SRVPID" 2>/dev/null && wait "$SRVPID" 2>/dev/null
+SRVPID=
+check "no sanitizer reports from the responder" bash -c \
+    "! grep -lE 'runtime error|ERROR: AddressSanitizer' '$WORK'/ftamd.*.log"
 
 echo
 echo "$PASS passed, $FAIL failed"
