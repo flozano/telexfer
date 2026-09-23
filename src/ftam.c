@@ -543,6 +543,7 @@ int ftam_connect(ftam_conn *fc, const ftam_opts *o)
     memset(fc, 0, sizeof *fc);
     fc->fd = -1;
     fc->vc.fd = -1;
+    fc->tpkt.fd = -1;
     fc->chunk_size = o->chunk_size ? o->chunk_size : 4096;
     fc->ctx[CTX_ACSE] = (pctx_t){ 1, OID_ACSE_AS, -1 };
     fc->ctx[CTX_PCI] = (pctx_t){ 3, OID_FTAM_PCI, -1 };
@@ -571,19 +572,29 @@ int ftam_connect(ftam_conn *fc, const ftam_opts *o)
         else
             log_msg(LOG_ERROR, L, "cannot open pcap file %s", o->pcap_path);
     }
-    if (x25_call(&fc->vc, fc->fd, &o->x25, o->timeout_ms,
-                 fc->tracing ? &fc->trace : NULL) < 0)
-        return -1;
-    fc->fd = -1;                                /* owned by vc now */
-    fc->vc.test_drop = o->test_drop;
-    if (o->interrupt_len &&
-        x25_interrupt(&fc->vc, o->interrupt_data, o->interrupt_len) < 0)
-        goto fail;
-    if (o->qdata_len &&
-        x25_send_qualified(&fc->vc, o->qdata, o->qdata_len) < 0)
-        goto fail;
+    net_conn net;
+    if (o->transport == TRANSPORT_RFC1006) {
+        /* no network connection establishment: TCP is up, TP0 goes next */
+        tpkt_init(&fc->tpkt, fc->fd, o->timeout_ms, fc->tracing ? &fc->trace : NULL);
+        fc->fd = -1;                            /* owned by tpkt now */
+        net = tpkt_net(&fc->tpkt);
+        log_msg(LOG_INFO, L, "transport: RFC 1006 (TPKT over TCP)");
+    } else {
+        if (x25_call(&fc->vc, fc->fd, &o->x25, o->timeout_ms,
+                     fc->tracing ? &fc->trace : NULL) < 0)
+            return -1;
+        fc->fd = -1;                            /* owned by vc now */
+        net = x25_net(&fc->vc);
+        fc->vc.test_drop = o->test_drop;
+        if (o->interrupt_len &&
+            x25_interrupt(&fc->vc, o->interrupt_data, o->interrupt_len) < 0)
+            goto fail;
+        if (o->qdata_len &&
+            x25_send_qualified(&fc->vc, o->qdata, o->qdata_len) < 0)
+            goto fail;
+    }
 
-    if (tp0_connect(&fc->tc, &fc->vc, o->tsel_calling, o->tsel_calling_len,
+    if (tp0_connect(&fc->tc, net, o->tsel_calling, o->tsel_calling_len,
                     o->tsel_called, o->tsel_called_len, o->tpdu_size) < 0)
         goto fail;
 
@@ -1517,6 +1528,7 @@ void ftam_close(ftam_conn *fc)
     ses_free(&fc->ses);
     if (fc->vc.fd >= 0 || fc->vc.state != X25_IDLE)
         x25_close(&fc->vc);
+    tpkt_close(&fc->tpkt);
     if (fc->fd >= 0)
         close(fc->fd);
     fc->fd = -1;

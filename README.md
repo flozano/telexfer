@@ -1,4 +1,4 @@
-# TELEXFER — FTAM file transfer over X.25/XOT
+# TELEXFER — FTAM file transfer over X.25/XOT and RFC 1006
 
 ```
 #####  #####  #      #####  #   #  #####  #####  ####
@@ -7,14 +7,20 @@
   #    #      #      #       # #   #      #      #  #
   #    #####  #####  #####  #   #  #      #####  #   #
 
-      ISO 8571 FTAM * OSI stack * X.25 over TCP
+     ISO 8571 FTAM * OSI stack * XOT and RFC 1006
 ```
 
 The binaries are `ftam` (client) and `ftamd` (test responder).
 
-A dependency-free C11 implementation of an ISO 8571 FTAM initiator that talks
-to an OSI responder over X.25, with X.25 carried over TCP (XOT, RFC 1613). It
-covers the whole stack; nothing comes from ISODE or any other OSI library.
+A dependency-free C11 implementation of an ISO 8571 FTAM initiator. It talks
+to an OSI responder in one of two ways:
+
+- over X.25 carried over TCP (XOT, RFC 1613), for partners on an X.25
+  network behind a router
+- directly over TCP (RFC 1006, port 102), the usual way on IP networks
+
+It covers the whole stack; nothing comes from ISODE or any other OSI
+library.
 
 | Layer        | Standard                     | File              |
 |--------------|------------------------------|-------------------|
@@ -23,8 +29,9 @@ covers the whole stack; nothing comes from ISODE or any other OSI library.
 | Presentation | ISO 8823 / X.226 (normal mode) | `src/pres.c`    |
 | Session      | ISO 8327 / X.225 (kernel, duplex, v1/v2) | `src/session.c` |
 | Transport    | ISO 8073 / X.224 class 0     | `src/tp0.c`       |
-| Network      | X.25 PLP (ISO 8208), mod 8/128 | `src/x25.c`     |
-| XOT          | RFC 1613, TCP port 1998      | `src/x25.c`       |
+| Network      | X.25 PLP (ISO 8208), mod 8/128, over XOT (RFC 1613, TCP port 1998) | `src/x25.c` |
+| ...or        | RFC 1006: TPKT over TCP, port 102 | `src/rfc1006.c` |
+| TCP          | connect/listen, deadline I/O | `src/tcp.c`       |
 | ASN.1        | BER (X.690)                  | `src/ber.c`       |
 
 ## Build
@@ -45,6 +52,10 @@ ftam -H xot-router.example:1998 -A 26245000012 -a 26245000099 \
 # send a text file (FTAM-1), replacing it if it already exists
 ftam -H 10.1.1.1 -A 1234567 --text --force put report.txt REPORT
 
+# the same over TCP/IP, without X.25 (RFC 1006, port 102)
+ftam --transport rfc1006 -H ftam.example --tsel 0x0001 --ssel 0x0001 \
+     --psel 0x0001 -u USER -p PASSWORD get REMOTE.DAT local.dat
+
 ftam ... attr REMOTE.DAT          # file attributes
 ftam ... rename OLD NEW
 ftam ... delete REMOTE.DAT
@@ -56,6 +67,9 @@ ftam ... dir [DIR]                # ... with type, size, modification time
 Run `ftam --help` for every option. The ones you will usually need to match
 the responder's configuration are:
 
+- **Transport:** `--transport xot` (the default) or `rfc1006`. The default
+  port follows the transport: 1998 or 102. X.25-only options are refused
+  with `rfc1006` rather than silently ignored.
 - **X.25:** `-A` called and `-a` calling X.121 addresses, `--packet-size`,
   `--window`, `--mod128`. The call user data defaults to `03010100` (the
   ISO/TR 9577 identifier for ISO 8073 transport). Override it with
@@ -88,9 +102,9 @@ session data overflow procedure (CN + OA + CDO).
 
 - `-v` logs events per layer; `-vv` adds packet-level detail; `-vvv` adds hex
   dumps.
-- `--pcap FILE` writes the XOT byte stream as a pcap file. Wireshark then
-  decodes every layer from XOT up to FTAM. On a port other than 1998, add
-  `-d tcp.port==PORT,xot`.
+- `--pcap FILE` writes the TCP byte stream as a pcap file. Wireshark then
+  decodes every layer up to FTAM, from XOT or from TPKT. On a port other
+  than 1998 or 102, add `-d tcp.port==PORT,xot` or `-d tcp.port==PORT,tpkt`.
 
 ## Protocol behaviour
 
@@ -122,8 +136,16 @@ session data overflow procedure (CN + OA + CDO).
   string significance *variable*. On get, a newline is added after each string
   unless the file declares *not-significant*.
 - **Release and abort.** `F-TERMINATE` travels over A-RELEASE (session FN/DN);
-  errors lead to `F-U-ABORT` over A-ABORT. In both cases the X.25 call is then
-  cleared, since class 0 has no transport disconnect of its own.
+  errors lead to `F-U-ABORT` over A-ABORT. Class 0 has no transport
+  disconnect of its own, so the network connection is then released: the
+  X.25 call is cleared, or with RFC 1006 the TCP connection is closed.
+- **RFC 1006.** TP0 is unchanged; only the network service below it
+  differs. Each TPDU travels in a TPKT (version 3, 16-bit length), and there
+  is no network connection setup. `--tpdu-size` goes up to 8192 here, while
+  class 0 over X.25 stops at 2048. The default stays 2048 on both, because a
+  strict class 0 responder may refuse larger sizes. The responder may lower
+  whatever is proposed. The X.25 procedures (REJ, D-bit, Q-bit, interrupts,
+  RNR) don't exist over TCP; TCP provides reliability and flow control.
 - **Directory listing.** There are two methods, and `--list-method` picks
   one (default `auto`):
   - **F-LIST** (`flist`) is the filestore-management PDU of FTAM version 2.
@@ -175,8 +197,17 @@ session data overflow procedure (CN + OA + CDO).
 
 ## Testing
 
-`tests/ftamd.c` is a small FTAM responder that serves a directory over XOT.
-`tests/run.sh` runs the client against it: get and put in both text and
+`tests/ftamd.c` is a small FTAM responder that serves a directory over XOT
+or RFC 1006 (`-t rfc1006`). `tests/run.sh` runs the client against it over
+both transports.
+
+- **Every test that doesn't depend on the network below TP0 runs twice**,
+  once per transport.
+- **XOT only:** the X.25 tests.
+- **RFC 1006 only:** TPDU sizes 8192 and 128, and the refusal of X.25
+  options.
+
+The tests cover get and put in both text and
 binary, a 300 KB transfer, overwrite and append, attributes, rename, delete,
 error paths and a rejected password. It also exercises X.25 edge cases:
 mod 128 with 1024-byte packets, window 1 with 128-byte TPDUs, and running
@@ -217,11 +248,20 @@ than the code:
   reassemble CDOs. It does name OA, CDO, Data Overflow and the Enclosure
   Items correctly.
 
-When `tshark` is available, every capture is decoded by Wireshark's XOT, X.25,
-COTP, SES, PRES, ACSE and FTAM dissectors, and any malformed packet or BER
-error fails the test. This is the check that does not depend on my own reading
-of the standards. It caught three wrong encodings in the test responder during
-development. All 130 checks also pass under ASan and UBSan.
+- **Arbitrary-encoded ACSE user-information.** Wireshark reads a
+  constructed (segmented) BIT STRING there as if it were primitive, and never
+  decodes arbitrary contents as FTAM. It can only confirm that nothing is
+  malformed. Our own client and responder decode it, which the test checks.
+
+When `tshark` is available, every capture is decoded by Wireshark's
+dissectors (XOT and X.25, or TPKT; then COTP, SES, PRES, ACSE and FTAM). Any
+malformed packet or BER error fails the test. For every run that is expected
+to succeed, the decode must also contain FTAM. Otherwise a capture Wireshark
+couldn't parse would pass silently; adding this found exactly one such case,
+the one listed above. This is the check that does not depend on my own
+reading of the standards. It caught three wrong encodings in the test
+responder during development. All 233 checks also pass under ASan and UBSan,
+and CI runs both on Ubuntu.
 
 For directory listing, the F-LIST tags were not taken from memory. They
 were found by feeding candidate encodings to Wireshark's FTAM dissector,

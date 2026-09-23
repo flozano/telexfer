@@ -13,6 +13,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "net.h"
+#include "tcp.h"
 #include "trace.h"
 #include "util.h"
 
@@ -97,10 +99,6 @@ typedef struct {
     size_t    cud_len;
 } x25_vc;
 
-/* TCP helpers. */
-int  tcp_connect(const char *host, int port, int timeout_ms);
-int  tcp_listen(const char *bind_addr, int port);
-
 /* Place a call (client) on an already connected XOT TCP socket. */
 int  x25_call(x25_vc *vc, int fd, const x25_params *p, int timeout_ms,
               trace_t *trace);
@@ -130,5 +128,8 @@ void x25_clear(x25_vc *vc, uint8_t cause, uint8_t diag);
 void x25_close(x25_vc *vc);
 
 const char *x25_cause_str(uint8_t cause);
+
+/* The call as TP0's network connection. */
+net_conn x25_net(x25_vc *vc);
 
 #endif

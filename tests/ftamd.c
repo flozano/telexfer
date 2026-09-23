@@ -20,12 +20,15 @@
 
 #include "ftam_pdu.h"
 #include "pres.h"
+#include "rfc1006.h"
 #include "session.h"
+#include "x25.h"
 
 static const char *L = "srv";
 
 typedef struct {
-    x25_vc    vc;
+    x25_vc    vc;               /* XOT */
+    tpkt_conn tpkt;             /* RFC 1006 (-t rfc1006) */
     tp0_conn  tc;
     ses_conn  ses;
     const char *dir;
@@ -66,6 +69,7 @@ typedef struct {
     int         pdv_mode;       /* -O octet-aligned, -A arbitrary */
     int         ext_concat;     /* -X */
     int         no_v2;          /* -L */
+    int         rfc1006;        /* -t rfc1006 */
     int         acse_encoding;  /* -E octet|arbitrary */
     size_t      segment;        /* -S */
     uint8_t     intr[X25_MAX_INT_DATA];
@@ -907,12 +911,21 @@ static void serve(int fd, const char *dir, const char *password, const char *pca
     s.tsdu_limit = so->tsdu_limit;
     buf_init(&s.out);
     buf_init(&s.octets);
-    if (pcap && trace_open(&tr, pcap, XOT_PORT, 40000) == 0)
+    s.vc.fd = -1;
+    s.tpkt.fd = -1;
+    if (pcap && trace_open(&tr, pcap, so->rfc1006 ? RFC1006_PORT : XOT_PORT, 40000) == 0)
         tracing = 1;
+    net_conn net;
+    if (so->rfc1006) {
+        tpkt_init(&s.tpkt, fd, 30000, tracing ? &tr : NULL);
+        net = tpkt_net(&s.tpkt);
+        goto transport;
+    }
     if (x25_accept(&s.vc, fd, 1024, 7, 30000, tracing ? &tr : NULL) < 0) {
         log_msg(LOG_ERROR, L, "call setup failed: %s", get_error());
         goto done;
     }
+    net = x25_net(&s.vc);
     s.vc.use_rej = so->use_rej;
     s.vc.test_drop = so->drop;
     s.vc.t25_ms = so->t25_ms;
@@ -927,16 +940,18 @@ static void serve(int fd, const char *dir, const char *password, const char *pca
         log_msg(LOG_ERROR, L, "interrupt failed: %s", get_error());
         goto done;
     }
-    if (tp0_accept(&s.tc, &s.vc, 2048) < 0) {
+transport:
+    /* class 0 over X.25 stops at 2048; RFC 1006 peers commonly go higher */
+    if (tp0_accept(&s.tc, net, so->rfc1006 ? 8192 : 2048) < 0) {
         log_msg(LOG_ERROR, L, "connection setup failed: %s", get_error());
         goto done;
     }
     int arc = associate(&s);
     if (arc != 0) {
-        /* wait for the initiator to clear the call */
+        /* wait for the initiator to release the network connection */
         buf_t tmp;
         buf_init(&tmp);
-        while (x25_recv(&s.vc, &tmp) == 0)
+        while (net.ops->recv(net.impl, &tmp) == 0)
             ;
         buf_free(&tmp);
         goto done;
@@ -979,14 +994,14 @@ static void serve(int fd, const char *dir, const char *password, const char *pca
             buf_free(&term);
             buf_free(&rlre);
             buf_free(&out);
-            /* initiator clears the network connection */
-            while (x25_recv(&s.vc, &ud) == 0)
+            /* the initiator releases the network connection */
+            while (net.ops->recv(net.impl, &ud) == 0)
                 ;
             break;
         }
         if (ev == SES_EV_ABORT) {
             log_msg(LOG_INFO, L, "association aborted by initiator");
-            while (x25_recv(&s.vc, &ud) == 0)
+            while (net.ops->recv(net.impl, &ud) == 0)
                 ;
             break;
         }
@@ -998,7 +1013,10 @@ done:
     buf_free(&s.out);
     buf_free(&s.octets);
     ses_free(&s.ses);
-    x25_close(&s.vc);
+    if (so->rfc1006)
+        tpkt_close(&s.tpkt);
+    else
+        x25_close(&s.vc);
     if (tracing)
         trace_close(&tr);
 }
@@ -1010,7 +1028,7 @@ int main(int argc, char **argv)
     srv_opts    so;
 
     memset(&so, 0, sizeof so);
-    while ((c = getopt(argc, argv, "p:d:P:w:b:1vs:RD:OI:T:AE:S:N:B:Q:XL")) != -1) {
+    while ((c = getopt(argc, argv, "p:d:P:w:b:1vs:RD:OI:T:AE:S:N:B:Q:XLt:")) != -1) {
         switch (c) {
         case 'p': port = atoi(optarg); break;
         case 'd': dir = optarg; break;
@@ -1031,6 +1049,14 @@ int main(int argc, char **argv)
         case 'N': so.hold_ms = atoi(optarg); break;
         case 'X': so.ext_concat = 1; break;
         case 'L': so.no_v2 = 1; break;
+        case 't':
+            if (strcmp(optarg, "rfc1006") == 0)
+                so.rfc1006 = 1;
+            else if (strcmp(optarg, "xot") != 0) {
+                fprintf(stderr, "ftamd: -t must be xot or rfc1006\n");
+                return 2;
+            }
+            break;
         case 'B': so.rx_limit = (size_t)atoi(optarg); break;
         case 'Q': {
             int n = parse_hex(optarg, so.qdata, sizeof so.qdata);
@@ -1062,6 +1088,8 @@ int main(int argc, char **argv)
 "  -N MS  send RNR after the call and stay not ready for MS ms\n"
 "  -B N   send RNR when more than N received octets are queued\n"
 "  -Q HEX send a qualified (Q-bit) NSDU after the call\n"
+"  -t T   transport: xot (default) or rfc1006 (TPKT over TCP); the\n"
+"         X.25 options (-R -D -T -N -B -Q -I) only apply to xot\n"
 "  -L     FTAM version 1 only: no F-LIST, directories via NBS-9\n"
 "  -X     test: send P-DATA as GT + MIP + DT (extended concatenation)\n"
 "         when the initiator announced it can receive that\n"

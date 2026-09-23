@@ -6,8 +6,8 @@ override CFLAGS += -std=c11 -D_DEFAULT_SOURCE -D_DARWIN_C_SOURCE -D_POSIX_C_SOUR
            -Wall -Wextra -Wshadow -Wno-unused-parameter
 LDFLAGS ?=
 
-LIB_SRCS = src/util.c src/ber.c src/trace.c src/x25.c src/tp0.c \
-           src/session.c src/pres.c src/ftam_pdu.c
+LIB_SRCS = src/util.c src/ber.c src/trace.c src/tcp.c src/x25.c src/rfc1006.c \
+           src/tp0.c src/session.c src/pres.c src/ftam_pdu.c
 LIB_OBJS = $(LIB_SRCS:.c=.o)
 
 all: ftam ftamd

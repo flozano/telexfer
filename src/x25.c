@@ -41,149 +41,6 @@
 
 static const char *L = "x25";
 
-/* ---- TCP --------------------------------------------------------------- */
-
-static long now_ms(void)
-{
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return ts.tv_sec * 1000L + ts.tv_nsec / 1000000L;
-}
-
-int tcp_connect(const char *host, int port, int timeout_ms)
-{
-    struct addrinfo  hints, *res, *ai;
-    char             portstr[16];
-    int              fd = -1, rc;
-
-    memset(&hints, 0, sizeof hints);
-    hints.ai_family = AF_UNSPEC;
-    hints.ai_socktype = SOCK_STREAM;
-    snprintf(portstr, sizeof portstr, "%d", port);
-    if ((rc = getaddrinfo(host, portstr, &hints, &res)) != 0) {
-        set_error("cannot resolve %s: %s", host, gai_strerror(rc));
-        return -1;
-    }
-    for (ai = res; ai; ai = ai->ai_next) {
-        fd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
-        if (fd < 0)
-            continue;
-        /* bounded connect: poll on a blocking socket is not enough, but
-         * the kernel connect timeout is acceptable for a CLI; use alarm-
-         * free approach with SO_SNDTIMEO */
-        struct timeval tv = { timeout_ms / 1000, (timeout_ms % 1000) * 1000 };
-        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
-        if (connect(fd, ai->ai_addr, ai->ai_addrlen) == 0)
-            break;
-        set_error("connect to %s:%d: %s", host, port, strerror(errno));
-        close(fd);
-        fd = -1;
-    }
-    freeaddrinfo(res);
-    if (fd >= 0) {
-        int one = 1;
-        setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
-        setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &one, sizeof one);
-#ifdef SO_NOSIGPIPE
-        setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof one);
-#endif
-        log_msg(LOG_INFO, "tcp", "connected to %s:%d", host, port);
-    }
-    return fd;
-}
-
-int tcp_listen(const char *bind_addr, int port)
-{
-    struct addrinfo hints, *res;
-    char            portstr[16];
-    int             fd, one = 1, rc;
-
-    memset(&hints, 0, sizeof hints);
-    hints.ai_family = AF_UNSPEC;
-    hints.ai_socktype = SOCK_STREAM;
-    hints.ai_flags = AI_PASSIVE;
-    snprintf(portstr, sizeof portstr, "%d", port);
-    if ((rc = getaddrinfo(bind_addr, portstr, &hints, &res)) != 0) {
-        set_error("getaddrinfo: %s", gai_strerror(rc));
-        return -1;
-    }
-    fd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
-    if (fd < 0) {
-        set_error("socket: %s", strerror(errno));
-        freeaddrinfo(res);
-        return -1;
-    }
-    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
-    if (bind(fd, res->ai_addr, res->ai_addrlen) < 0 || listen(fd, 8) < 0) {
-        set_error("bind/listen port %d: %s", port, strerror(errno));
-        close(fd);
-        freeaddrinfo(res);
-        return -1;
-    }
-    freeaddrinfo(res);
-    return fd;
-}
-
-static int write_all(int fd, const struct iovec *iov, int cnt)
-{
-    struct iovec v[4];
-    memcpy(v, iov, sizeof(*iov) * (size_t)cnt);
-    while (cnt > 0) {
-        ssize_t w = writev(fd, v, cnt);
-        if (w < 0) {
-            if (errno == EINTR)
-                continue;
-            set_error("XOT write: %s", strerror(errno));
-            return -1;
-        }
-        while (cnt > 0 && (size_t)w >= v[0].iov_len) {
-            w -= (ssize_t)v[0].iov_len;
-            memmove(v, v + 1, sizeof(*v) * (size_t)(cnt - 1));
-            cnt--;
-        }
-        if (cnt > 0) {
-            v[0].iov_base = (char *)v[0].iov_base + w;
-            v[0].iov_len -= (size_t)w;
-        }
-    }
-    return 0;
-}
-
-static int read_full(int fd, uint8_t *p, size_t n, long deadline)
-{
-    while (n > 0) {
-        long left = deadline - now_ms();
-        if (left <= 0) {
-            set_error("timeout waiting for XOT data");
-            return -2;
-        }
-        struct pollfd pfd = { fd, POLLIN, 0 };
-        int pr = poll(&pfd, 1, (int)left);
-        if (pr < 0) {
-            if (errno == EINTR)
-                continue;
-            set_error("poll: %s", strerror(errno));
-            return -1;
-        }
-        if (pr == 0)
-            continue;
-        ssize_t r = read(fd, p, n);
-        if (r < 0) {
-            if (errno == EINTR)
-                continue;
-            set_error("XOT read: %s", strerror(errno));
-            return -1;
-        }
-        if (r == 0) {
-            set_error("XOT connection closed by peer");
-            return -1;
-        }
-        p += r;
-        n -= (size_t)r;
-    }
-    return 0;
-}
-
 /* ---- XOT packet I/O ---------------------------------------------------- */
 
 static int send_pkt(x25_vc *vc, const uint8_t *pkt, size_t n)
@@ -200,17 +57,17 @@ static int send_pkt(x25_vc *vc, const uint8_t *pkt, size_t n)
             trace_write(vc->trace, 1, tmp, n + 4);
         }
     }
-    return write_all(vc->fd, iov, 2);
+    return tcp_write_all(vc->fd, iov, 2);
 }
 
 /* 0 = packet read, -2 = timeout (nothing read), -1 = error */
 static int read_pkt(x25_vc *vc, buf_t *pkt, int timeout_ms)
 {
-    long    deadline = now_ms() + timeout_ms;
+    long    deadline = tcp_now_ms() + timeout_ms;
     uint8_t hdr[4];
     int     rc;
 
-    if ((rc = read_full(vc->fd, hdr, 4, deadline)) < 0)
+    if ((rc = tcp_read_full(vc->fd, hdr, 4, deadline)) < 0)
         return rc;
     unsigned ver = (unsigned)(hdr[0] << 8 | hdr[1]);
     size_t   len = (size_t)(hdr[2] << 8 | hdr[3]);
@@ -224,7 +81,7 @@ static int read_pkt(x25_vc *vc, buf_t *pkt, int timeout_ms)
     }
     buf_reset(pkt);
     buf_reserve(pkt, len);
-    if (read_full(vc->fd, pkt->data, len, deadline) < 0)
+    if (tcp_read_full(vc->fd, pkt->data, len, deadline) < 0)
         return -1;
     pkt->len = len;
     log_hex(LOG_DUMP, L, "recv packet", pkt->data, len);
@@ -438,6 +295,28 @@ static size_t parse_setup(x25_vc *vc, const uint8_t *p, size_t n,
         off += plen;
     }
     return fend;
+}
+
+static int net_send(void *impl, const uint8_t *p, size_t n)
+{
+    return x25_send(impl, p, n);
+}
+
+static int net_recv(void *impl, buf_t *out)
+{
+    return x25_recv(impl, out);
+}
+
+static void net_disconnect(void *impl)
+{
+    x25_clear(impl, 0x00, 0);
+}
+
+static const net_ops x25_ops = { "X.25/XOT", net_send, net_recv, net_disconnect };
+
+net_conn x25_net(x25_vc *vc)
+{
+    return (net_conn){ &x25_ops, vc };
 }
 
 const char *x25_cause_str(uint8_t cause)
@@ -851,14 +730,7 @@ int x25_accept(x25_vc *vc, int fd, int max_pkt, int max_win, int timeout_ms,
     vc->timeout_ms = timeout_ms;
     buf_init(&rx);
 
-    /* X.25 packets are small and window-paced: with Nagle, a packet
-     * waits for the peer's (delayed) ACK of the previous one, which
-     * costs ~40 ms per window on Linux */
-    int one = 1;
-    setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
-#ifdef SO_NOSIGPIPE
-    setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof one);
-#endif
+    tcp_tune(fd);
 
     for (;;) {
         if (read_pkt(vc, &rx, timeout_ms) < 0) {
@@ -1046,7 +918,7 @@ int x25_set_busy(x25_vc *vc, int busy)
 
 int x25_hold(x25_vc *vc, int ms)
 {
-    vc->hold_until = now_ms() + ms;
+    vc->hold_until = tcp_now_ms() + ms;
     log_msg(LOG_INFO, L, "receiver not ready for %d ms", ms);
     if (vc->busy)
         return 0;
@@ -1089,7 +961,7 @@ int x25_interrupt(x25_vc *vc, const uint8_t *data, size_t n)
 int x25_recv(x25_vc *vc, buf_t *out)
 {
     buf_t rx;
-    long  deadline = now_ms() + vc->timeout_ms;
+    long  deadline = tcp_now_ms() + vc->timeout_ms;
     buf_init(&rx);
     while (!vc->qhead) {
         if (vc->state != X25_DATA) {
@@ -1097,9 +969,9 @@ int x25_recv(x25_vc *vc, buf_t *out)
             buf_free(&rx);
             return -1;
         }
-        long wait = deadline - now_ms();
+        long wait = deadline - tcp_now_ms();
         if (vc->hold_until) {
-            long rem = vc->hold_until - now_ms();
+            long rem = vc->hold_until - tcp_now_ms();
             if (rem <= 0) {
                 vc->hold_until = 0;
                 if (update_busy(vc) < 0) {
@@ -1112,7 +984,7 @@ int x25_recv(x25_vc *vc, buf_t *out)
                 wait = rem;
         }
         int rc = wait > 0 ? read_pkt(vc, &rx, (int)wait) : -2;
-        if (rc == -2 && vc->hold_until && now_ms() < deadline)
+        if (rc == -2 && vc->hold_until && tcp_now_ms() < deadline)
             continue;                           /* hold expired, not us */
         if (rc < 0 || process_pkt(vc, rx.data, rx.len) < 0) {
             buf_free(&rx);
@@ -1145,9 +1017,9 @@ void x25_clear(x25_vc *vc, uint8_t cause, uint8_t diag)
     }
     vc->state = X25_CLEARING;
     buf_init(&rx);
-    long deadline = now_ms() + 5000;
-    while (vc->state == X25_CLEARING && now_ms() < deadline) {
-        if (read_pkt(vc, &rx, (int)(deadline - now_ms())) < 0)
+    long deadline = tcp_now_ms() + 5000;
+    while (vc->state == X25_CLEARING && tcp_now_ms() < deadline) {
+        if (read_pkt(vc, &rx, (int)(deadline - tcp_now_ms())) < 0)
             break;
         uint8_t t = rx.data[2];
         if (t == PT_CLEAR_CONF || t == PT_CLEAR_REQ)

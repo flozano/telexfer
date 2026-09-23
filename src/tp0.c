@@ -1,5 +1,5 @@
 /*
- * tp0.c - ISO 8073 / X.224 transport class 0.
+ * tp0.c - ISO 8073 / X.224 transport class 0 over any net_conn.
  */
 #include "tp0.h"
 
@@ -20,7 +20,7 @@ static const char *L = "tp0";
 static int size_code(int size)
 {
     int c = 7;
-    while (c < 11 && (1 << (c + 1)) <= size)
+    while (c < 13 && (1 << (c + 1)) <= size)
         c++;
     return c;
 }
@@ -67,7 +67,7 @@ static void parse_params(tp0_conn *tc, const uint8_t *p, size_t n,
     (void)tc;
 }
 
-int tp0_connect(tp0_conn *tc, x25_vc *vc,
+int tp0_connect(tp0_conn *tc, net_conn net,
                 const uint8_t *calling, size_t calling_len,
                 const uint8_t *called, size_t called_len, int tpdu_size)
 {
@@ -76,7 +76,7 @@ int tp0_connect(tp0_conn *tc, x25_vc *vc,
     buf_t   rx;
 
     memset(tc, 0, sizeof *tc);
-    tc->vc = vc;
+    tc->net = net;
     tc->sref = 0x0001;
     if (tpdu_size <= 0)
         tpdu_size = 2048;
@@ -109,11 +109,11 @@ int tp0_connect(tp0_conn *tc, x25_vc *vc,
     cr[0] = (uint8_t)(n - 1);
 
     log_msg(LOG_INFO, L, "CR class 0, TPDU size %d", 1 << size_code(tpdu_size));
-    if (x25_send(vc, cr, n) < 0)
+    if (net.ops->send(net.impl, cr, n) < 0)
         return -1;
 
     buf_init(&rx);
-    if (x25_recv(vc, &rx) < 0) {
+    if (net.ops->recv(net.impl, &rx) < 0) {
         buf_free(&rx);
         return -1;
     }
@@ -153,14 +153,14 @@ int tp0_connect(tp0_conn *tc, x25_vc *vc,
     return -1;
 }
 
-int tp0_accept(tp0_conn *tc, x25_vc *vc, int max_tpdu)
+int tp0_accept(tp0_conn *tc, net_conn net, int max_tpdu)
 {
     buf_t rx;
     memset(tc, 0, sizeof *tc);
-    tc->vc = vc;
+    tc->net = net;
     tc->sref = 0x0002;
     buf_init(&rx);
-    if (x25_recv(vc, &rx) < 0) {
+    if (net.ops->recv(net.impl, &rx) < 0) {
         buf_free(&rx);
         return -1;
     }
@@ -192,7 +192,7 @@ int tp0_accept(tp0_conn *tc, x25_vc *vc, int max_tpdu)
     cc[n++] = (uint8_t)size_code(tc->tpdu_size);
     cc[0] = (uint8_t)(n - 1);
     log_msg(LOG_INFO, L, "CR accepted, TPDU size %d", tc->tpdu_size);
-    return x25_send(vc, cc, n);
+    return net.ops->send(net.impl, cc, n);
 }
 
 int tp0_send(tp0_conn *tc, const uint8_t *p, size_t n)
@@ -212,7 +212,7 @@ int tp0_send(tp0_conn *tc, const uint8_t *p, size_t n)
         tpdu[1] = TPDU_DT;
         tpdu[2] = eot ? 0x80 : 0x00;
         memcpy(tpdu + 3, p + off, chunk);
-        if (x25_send(tc->vc, tpdu, chunk + 3) < 0)
+        if (tc->net.ops->send(tc->net.impl, tpdu, chunk + 3) < 0)
             return -1;
         off += chunk;
     } while (off < n);
@@ -226,7 +226,7 @@ int tp0_recv(tp0_conn *tc, buf_t *tsdu)
     buf_init(&rx);
     buf_reset(tsdu);
     for (;;) {
-        if (x25_recv(tc->vc, &rx) < 0) {
+        if (tc->net.ops->recv(tc->net.impl, &rx) < 0) {
             buf_free(&rx);
             return -1;
         }
@@ -262,6 +262,6 @@ int tp0_recv(tp0_conn *tc, buf_t *tsdu)
 
 void tp0_disconnect(tp0_conn *tc)
 {
-    if (tc->vc)
-        x25_clear(tc->vc, 0x00, 0);
+    if (tc->net.ops)
+        tc->net.ops->disconnect(tc->net.impl);
 }

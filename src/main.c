@@ -27,8 +27,13 @@ static void usage(FILE *f)
 "  dir [dir]                list with type, size and modification time\n"
 "  ping                     establish and release an FTAM association\n"
 "\n"
-"XOT / X.25:\n"
-"  -H, --host HOST[:PORT]   XOT peer (router or gateway), default port 1998\n"
+"Network:\n"
+"  -H, --host HOST[:PORT]   the peer: an XOT router/gateway (default port\n"
+"                           1998) or, with RFC 1006, the responder (port 102)\n"
+"      --transport T        xot (default): TP0 over X.25 over TCP (RFC 1613)\n"
+"                           rfc1006: TP0 directly over TCP (RFC 1006)\n"
+"\n"
+"X.25 (XOT only):\n"
 "  -A, --called X121        called DTE address\n"
 "  -a, --calling X121       calling DTE address\n"
 "      --cud HEX            call user data (default 03010100; \"\" = none)\n"
@@ -57,7 +62,8 @@ static void usage(FILE *f)
 "      --calling-ssel SEL   calling session selector\n"
 "      --psel SEL           called presentation selector\n"
 "      --calling-psel SEL   calling presentation selector\n"
-"      --tpdu-size N        maximum TPDU size, 128..2048 (default 2048)\n"
+"      --tpdu-size N        maximum TPDU size, 128..2048 (default 2048);\n"
+"                           up to 8192 with --transport rfc1006\n"
 "      --tsdu-size N        propose session segmenting with this TSDU\n"
 "                           maximum size (64..65535; default: none)\n"
 "      --ext-concat         announce that we accept extended concatenated\n"
@@ -101,11 +107,12 @@ enum {
     O_ACCOUNT, O_APPEND, O_CHUNK, O_TIMEOUT, O_PCAP, O_NOGROUP,
     O_REJ, O_DBIT, O_INTERRUPT, O_TSDU, O_OCTET, O_T25,
     O_PDVENC, O_ACSEENC, O_PDVSEG, O_RXBUF, O_QDATA, O_EXTCONCAT,
-    O_LISTMETHOD,
+    O_LISTMETHOD, O_TRANSPORT,
 };
 
 static const struct option longopts[] = {
     { "host", required_argument, NULL, 'H' },
+    { "transport", required_argument, NULL, O_TRANSPORT },
     { "called", required_argument, NULL, 'A' },
     { "calling", required_argument, NULL, 'a' },
     { "cud", required_argument, NULL, O_CUD },
@@ -187,6 +194,27 @@ static int enc_arg(const char *opt, const char *s)
     exit(2);
 }
 
+/* Options that only mean something for X.25, i.e. with XOT. */
+static const char *x25_only_opt(int c)
+{
+    switch (c) {
+    case 'A': return "--called";
+    case 'a': return "--calling";
+    case O_CUD: return "--cud";
+    case O_PKT: return "--packet-size";
+    case O_WIN: return "--window";
+    case O_MOD128: return "--mod128";
+    case O_LCN: return "--lcn";
+    case O_REJ: return "--rej";
+    case O_T25: return "--t25";
+    case O_DBIT: return "--dbit";
+    case O_INTERRUPT: return "--interrupt";
+    case O_RXBUF: return "--rx-buffer";
+    case O_QDATA: return "--qdata";
+    default: return NULL;
+    }
+}
+
 static int is_pow2(long v)
 {
     return v > 0 && (v & (v - 1)) == 0;
@@ -197,6 +225,8 @@ int main(int argc, char **argv)
     ftam_opts o;
     int       doctype = 3, force = 0, append = 0, c;
     int       list_method = LIST_AUTO;
+    int       port_given = 0;
+    const char *x25_opt = NULL;
     char     *hostarg = NULL;
 
     ftam_opts_default(&o);
@@ -204,13 +234,27 @@ int main(int argc, char **argv)
     /* test hook: discard the Nth received X.25 data packet (see tests/) */
     if (getenv("FTAM_TEST_DROP"))
         o.test_drop = atoi(getenv("FTAM_TEST_DROP"));
+    if (o.test_drop)
+        x25_opt = "FTAM_TEST_DROP";
     /* test hook: pad the F-INITIALIZE so connect data needs OA/CDO */
     if (getenv("FTAM_TEST_PAD"))
         o.impl_pad = (size_t)atoi(getenv("FTAM_TEST_PAD"));
 
     while ((c = getopt_long(argc, argv, "H:A:a:u:p:btfvh", longopts, NULL)) != -1) {
+        if (x25_only_opt(c))
+            x25_opt = x25_only_opt(c);
         switch (c) {
         case 'H': hostarg = optarg; break;
+        case O_TRANSPORT:
+            if (strcmp(optarg, "xot") == 0)
+                o.transport = TRANSPORT_XOT;
+            else if (strcmp(optarg, "rfc1006") == 0)
+                o.transport = TRANSPORT_RFC1006;
+            else {
+                fprintf(stderr, "ftam: --transport must be xot or rfc1006\n");
+                return 2;
+            }
+            break;
         case 'A': o.x25.called = optarg; break;
         case 'a': o.x25.calling = optarg; break;
         case O_CUD: {
@@ -270,7 +314,7 @@ int main(int argc, char **argv)
         case O_PSEL: sel_arg("--psel", optarg, o.psel_called, 16, &o.psel_called_len); break;
         case O_CPSEL: sel_arg("--calling-psel", optarg, o.psel_calling, 16, &o.psel_calling_len); break;
         case O_TPDU:
-            o.tpdu_size = (int)num_arg("--tpdu-size", optarg, 128, 2048);
+            o.tpdu_size = (int)num_arg("--tpdu-size", optarg, 128, 8192);
             if (!is_pow2(o.tpdu_size)) {
                 fprintf(stderr, "ftam: TPDU size must be a power of two\n");
                 return 2;
@@ -322,6 +366,17 @@ int main(int argc, char **argv)
         fprintf(stderr, "ftam: --force and --append are mutually exclusive\n");
         return 2;
     }
+    if (o.transport == TRANSPORT_RFC1006 && x25_opt) {
+        fprintf(stderr, "ftam: %s is an X.25 option; it has no meaning with "
+                        "--transport rfc1006\n", x25_opt);
+        return 2;
+    }
+    if (o.transport == TRANSPORT_XOT && o.tpdu_size > 2048) {
+        /* class 0 over X.25 is limited to 2048 (ISO 8073); RFC 1006
+         * implementations commonly accept more */
+        fprintf(stderr, "ftam: --tpdu-size above 2048 needs --transport rfc1006\n");
+        return 2;
+    }
     /* HOST[:PORT], IPv6 as [addr]:port */
     static char hostbuf[256];
     snprintf(hostbuf, sizeof hostbuf, "%s", hostarg);
@@ -332,13 +387,18 @@ int main(int argc, char **argv)
         if (rb) {
             *rb = 0;
             o.host = hostbuf + 1;
-            if (rb[1] == ':')
+            if (rb[1] == ':') {
                 o.port = (int)num_arg("--host port", rb + 2, 1, 65535);
+                port_given = 1;
+            }
         }
     } else if (colon && strchr(hostbuf, ':') == colon) {
         *colon = 0;
         o.port = (int)num_arg("--host port", colon + 1, 1, 65535);
+        port_given = 1;
     }
+    if (!port_given)
+        o.port = o.transport == TRANSPORT_RFC1006 ? RFC1006_PORT : XOT_PORT;
 
     const char *cmd = argv[0];
     int         nargs = argc - 1;

@@ -9,12 +9,18 @@
 
 #include "ftam_pdu.h"
 #include "pres.h"
+#include "rfc1006.h"
 #include "session.h"
+#include "x25.h"
+
+/* network service under TP0 */
+enum { TRANSPORT_XOT = 0, TRANSPORT_RFC1006 };
 
 typedef struct {
-    /* XOT / X.25 */
+    int         transport;          /* TRANSPORT_XOT or TRANSPORT_RFC1006 */
     const char *host;
     int         port;
+    /* X.25 (XOT only) */
     x25_params  x25;
     int         timeout_ms;
     const char *pcap_path;
@@ -65,7 +71,8 @@ typedef struct {
     int         fd;
     trace_t     trace;
     int         tracing;
-    x25_vc      vc;
+    x25_vc      vc;                 /* TRANSPORT_XOT */
+    tpkt_conn   tpkt;               /* TRANSPORT_RFC1006 */
     tp0_conn    tc;
     ses_conn    ses;
     pctx_t      ctx[CTX_COUNT];
