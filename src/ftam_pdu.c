@@ -14,10 +14,11 @@ void ftam_enc_contents_type(ber_enc *e, const contents_type *ct)
             ct->doctype == 1 ? OID_FTAM_1 :
             ct->doctype == 9 ? OID_NBS9_DOC : OID_FTAM_3);
     if (ct->doctype == 9) {
-        /* NBS-9 parameter: the attributes each directory entry carries */
+        /* NBS-9-Parameters ::= [0] IMPLICIT Attribute-Names: the
+         * attributes each directory entry carries */
         if (ct->nbs9_names > 0) {
-            ber_begin(e, T_CTXC(0));
-            ber_bits(e, T_BITS, (uint32_t)ct->nbs9_names);
+            ber_begin(e, T_CTXC(0));            /* parameter */
+            ber_bits(e, T_CTX(0), (uint32_t)ct->nbs9_names);
             ber_end(e);
         }
     } else if (ct->universal_class >= 0 || ct->max_string_length >= 0 ||
@@ -375,6 +376,18 @@ const char *ftam_pdu_name(unsigned tag)
 
 /* ---- directory entries -------------------------------------------------- */
 
+void ftam_fix_gtime(char *gt)
+{
+    if (strlen(gt) < 4 || strspn(gt, "0123456789") < 4)
+        return;
+    int year = (gt[0] - '0') * 1000 + (gt[1] - '0') * 100 + (gt[2] - '0') * 10 + (gt[3] - '0');
+    if (year < 100 || year > 999)
+        return;
+    char y[8];
+    snprintf(y, sizeof y, "%04d", year + 1900);
+    memcpy(gt, y, 4);
+}
+
 /* A constructed value whose first element is a filename/pathname [0]. */
 static int looks_like_attributes(const ber_tlv *t)
 {
@@ -447,8 +460,10 @@ int ftam_parse_dirent(const ber_tlv *attrs, ftam_dirent *e)
                 continue;                       /* no value available */
             if (n == 4) {
                 ber_get_cstr(&in, e->ctime, sizeof e->ctime);
+                ftam_fix_gtime(e->ctime);
             } else if (n == 5) {
                 ber_get_cstr(&in, e->mtime, sizeof e->mtime);
+                ftam_fix_gtime(e->mtime);
             } else {
                 long v;
                 if (ber_get_int(&in, &v) == 0)
@@ -563,6 +578,8 @@ void ftam_print_attributes(FILE *f, const ber_tlv *attrs)
             } else {
                 char buf[256];
                 ber_get_cstr(&in, buf, sizeof buf);
+                if (n >= 4 && n <= 7)           /* dates */
+                    ftam_fix_gtime(buf);
                 fputs(buf, f);
             }
         }

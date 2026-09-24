@@ -39,6 +39,7 @@ library.
 ```sh
 make            # builds ./ftam (client) and ./ftamd (test responder)
 make test       # end-to-end test suite (uses tshark if installed)
+tests/isode-interop.sh   # against ISODE's FTAM responder (needs Docker)
 ```
 
 ## Usage
@@ -187,8 +188,10 @@ this.
     management, and grouping.
   - Attribute group proposed: storage.
 - **Regimes.** If the responder grants grouping, select/open and close/deselect
-  are sent as `F-BEGIN-GROUP … F-END-GROUP`. Otherwise (`--no-grouping`, or not
-  granted) the requests go one at a time. If a step fails, the client unwinds
+  are sent as `F-BEGIN-GROUP … F-END-GROUP`, all in a single P-DATA with one
+  PDV-list per PDU. ISODE aborts a group that is spread over several
+  P-DATAs. Otherwise (`--no-grouping`, or not granted) the requests go one
+  at a time. If a step fails, the client unwinds
   the regime, for example by deselecting when the select succeeded but the open
   failed.
 - **Read.** `F-READ` with FADU identity *first* and access context
@@ -196,9 +199,15 @@ this.
 - **Write.** Create, then open, then `F-WRITE` with FADU operation *replace*,
   or *extend* with `--append`. Overwrite (`--force`) uses create override
   *delete-and-create-with-new-attributes*.
-- **Text (FTAM-1).** Each line is sent as one GeneralString, declared with
-  string significance *variable*. On get, a newline is added after each string
-  unless the file declares *not-significant*.
+- **Text (FTAM-1).** Text is sent as GeneralString with the line ends inside,
+  declared with universal class GeneralString and string significance
+  *not-significant*. That's the parameter ISODE generates for its own text
+  files. On the wire lines end in CR LF, like FTP's ASCII mode: local LF is
+  converted on put and converted back on get.
+  - **Reading:** the string type decides. GraphicString, PrintableString and
+    VisibleString can't hold control characters, so each such string is one
+    line and gets a newline. The others (GeneralString, IA5String, …) are
+    written as they are, after the CR LF conversion.
 - **Release and abort.** `F-TERMINATE` travels over A-RELEASE (session FN/DN);
   errors lead to `F-U-ABORT` over A-ABORT. Class 0 has no transport
   disconnect of its own, so the network connection is then released: the
@@ -218,9 +227,16 @@ this.
   - **NBS-9** (`nbs9`) is the older convention that most version-1
     responders support. The directory is selected and opened as an NBS-9
     *file directory file* (`1.3.14.5.5.9`), and each data element read
-    (flat-all-data-units) is one entry's attributes. The entries use
+    is one entry's attributes. The entries use
     abstract syntax `1.3.14.5.2.2`, proposed as its own presentation
-    context.
+    context. The details follow ISODE, the reference implementation:
+    - the parameter is `[0] IMPLICIT Attribute-Names`
+    - each entry is `[PRIVATE 2] Read-Attributes`
+    - the read uses unstructured-all-data-units, since ISODE refuses any
+      other access context; if a responder refuses that, the client retries
+      with flat-all-data-units
+    - entry names may be paths from the home directory, as with ISODE, and
+      are shown relative to the directory listed
 
   Only `ls`/`dir` offer protocol version 2; every other command negotiates
   exactly as before. `auto` uses F-LIST when the responder grants version 2
@@ -346,27 +362,63 @@ which has the full FTAM version 2 grammar. That established:
 Real captures decode completely, down to the any-match filter and each
 entry's attributes.
 
+## Interoperability: ISODE
+
+`tests/isode-interop.sh` runs the client against ISODE's FTAM responder
+(`tsapd` → `ftamd`, over RFC 1006). ISODE is an implementation written
+independently of this one, in the early 1990s, and was the reference for
+much of the OSI world. It is built from source (the maintained
+[Wildboar Software fork](https://github.com/Wildboar-Software/isode),
+pinned) in `interop/isode/`, and the test runs in CI.
+
+34 checks pass:
+- association (ISODE picks FTAM version 1, transfer-and-management)
+- binary and text round trips, byte-identical on both sides
+- attributes, rename, delete, the missing-file diagnostic
+- `ls`/`dir` through NBS-9
+- `collect` through a rotation, a wrap, a gap and `--ack delete`
+
+**Testing against ISODE changed TELEXFER in four places**, all described
+above under protocol behaviour:
+- grouped requests go in one P-DATA
+- text travels with CR LF line ends, with line handling decided by the
+  string type
+- the NBS-9 parameter tag and entry wrapper
+- the NBS-9 access context
+
+**ISODE bugs found along the way:**
+- **`tsapd` no longer compiles at the pinned commit.** Upstream commit
+  `43aaabae` declares `ssapd` as a function pointer but defines a function.
+  The Dockerfile patches the two declarations back.
+- **Years from 2000 on are sent as `01YY`.** A `YEAR()` macro leaves
+  `tm_year` (years since 1900) unconverted once it reaches 100, so 2026
+  becomes `0126`. TELEXFER repairs a four-digit year of 100–999 by adding
+  1900, which matters for `collect`'s ordering.
+- **`ftamd -d` crashes on data values of 4096 octets or more,** in its debug
+  hex dump. The interop setup runs without `-d` (`FTAMD_DEBUG=1` turns it
+  on).
+- **Some renames fail with ENOENT inside ISODE.** For example,
+  `copyofack/AMA0002` → `copyofack/AMA0002.DONE` fails, while
+  `LLLLLLLLL/AMA0002` → `LLLLLLLLL/AMA0002.DONE` works. It depends on the
+  names and not on the files, and the request is identical in form. This
+  isn't characterised further; the test uses names that work.
+
 ## Limitations
 
 **NBS-9 entries are not checked by Wireshark.** Its dissector has no model
 of NBS-9 entries: it hands them to the FTAM PDU decoder, which reports
 "zero-byte FTAM PDU". The test suite does not count that message as a
-failure. The client therefore accepts an entry in any wrapping: bare
-`Read-Attributes`, inside a SEQUENCE, or under another tag. The test
-responder sends bare `Read-Attributes`. The NBS-9 parameter (which
-attributes each entry carries) is sent as an untagged BIT STRING; the
-responder also accepts a `[0]`-tagged one.
+failure. The NBS-9 encoding is instead confirmed by ISODE (see
+[Interoperability](#interoperability-isode)). The client still accepts an
+entry in any wrapping.
 
-**Tested only against the bundled responder and Wireshark's dissectors.** It
-has not been run against a real FTAM responder (vendor or bank) or a Cisco XOT
-router. Real peers differ in the details the standards leave open. The places
-most likely to need adjustment are:
+**Tested against one independent implementation (ISODE), over RFC 1006
+only.** It has not been run against a vendor FTAM responder (a switch, a
+bank) or a Cisco XOT router. The places most likely to need adjustment
+against those are:
 
-- the call user data (`--cud`)
-- FTAM-1 string class and significance
-- the FADU identity and operation used for writes
-- whether a responder insists on groups arriving in a single P-DATA (not
-  implemented)
+- the call user data (`--cud`), which ISODE, reached over TCP, doesn't use
+- the FADU identity and operation used for writes (ISODE accepts them)
 
 **Not implemented:**
 

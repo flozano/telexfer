@@ -146,6 +146,32 @@ const char *get_error(void)
     return last_error[0] ? last_error : "unknown error";
 }
 
+void text_to_crlf(const uint8_t *in, size_t n, buf_t *out, int *prev)
+{
+    for (size_t i = 0; i < n; i++) {
+        if (in[i] == '\n' && *prev != '\r')
+            buf_put8(out, '\r');
+        buf_put8(out, in[i]);
+        *prev = in[i];
+    }
+}
+
+void text_from_crlf(const uint8_t *in, size_t n, buf_t *out, int *pending_cr)
+{
+    for (size_t i = 0; i < n; i++) {
+        if (*pending_cr) {
+            *pending_cr = 0;
+            if (in[i] != '\n')
+                buf_put8(out, '\r');   /* a lone CR stays */
+        }
+        if (in[i] == '\r') {
+            *pending_cr = 1;
+            continue;
+        }
+        buf_put8(out, in[i]);
+    }
+}
+
 int parse_hex(const char *s, uint8_t *out, size_t max)
 {
     size_t n = 0;

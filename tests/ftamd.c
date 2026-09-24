@@ -47,6 +47,7 @@ typedef struct {
     int       doctype;
     int       writing;
     FILE     *wf;
+    int       pending_cr;       /* text write: CR LF -> LF across strings */
     int       group_failed;
     int       in_group;
     buf_t     out;              /* pending P-DATA user data */
@@ -211,8 +212,9 @@ static void enc_ct(ber_enc *e, int doctype)
     contents_type ct = { .doctype = doctype, .universal_class = -1,
                          .max_string_length = -1, .significance = -1 };
     if (doctype == 1) {
+        /* GeneralString with the line ends inside, like ISODE */
         ct.universal_class = 27;
-        ct.significance = SS_VARIABLE;
+        ct.significance = SS_NOT_SIGNIFICANT;
     }
     ftam_enc_contents_type(e, &ct);
 }
@@ -486,7 +488,10 @@ static void read_directory(srv_t *s)
         buf_reset(&v);
         ber_enc ve;
         ber_enc_init(&ve, &v);
+        /* NBS-9-Datatype1 ::= [PRIVATE 2] Read-Attributes (explicit) */
+        ber_begin(&ve, BER_TAG(0xe0, 2));
         enc_entry(&ve, s, s->path, names[i], s->nbs9_names);
+        ber_end(&ve);
         if (v.len)
             queue_data(s, s->ctx_nbs9, &v);
         free(names[i]);
@@ -578,28 +583,27 @@ static void do_read(srv_t *s)
         buf_free(&b);
         return;
     }
-    if (s->doctype == 1) {
-        char   *line = NULL;
-        size_t  cap = 0;
-        ssize_t n;
-        while ((n = getline(&line, &cap, f)) >= 0) {
-            while (n > 0 && (line[n - 1] == '\n' || line[n - 1] == '\r'))
-                n--;
-            buf_reset(&v);
-            ber_enc_init(&e, &v);
-            ber_prim(&e, T_GENERAL, line, (size_t)n);
-            queue_data(s, ctx, &v);
-        }
-        free(line);
-    } else {
+    {
+        /* FTAM-1: GeneralString chunks with CR LF line ends (as ISODE
+         * sends them); FTAM-3: OCTET STRING chunks */
         uint8_t chunk[1000];
         size_t  n;
+        int     prev = 0;
+        buf_t   crlf;
+        buf_init(&crlf);
         while ((n = fread(chunk, 1, sizeof chunk, f)) > 0) {
             buf_reset(&v);
             ber_enc_init(&e, &v);
-            ber_prim(&e, T_OCTETS, chunk, n);
+            if (s->doctype == 1) {
+                buf_reset(&crlf);
+                text_to_crlf(chunk, n, &crlf, &prev);
+                ber_prim(&e, T_GENERAL, crlf.data, crlf.len);
+            } else {
+                ber_prim(&e, T_OCTETS, chunk, n);
+            }
             queue_data(s, ctx, &v);
         }
+        buf_free(&crlf);
     }
     flush_octets(s, ctx);
     fclose(f);
@@ -734,10 +738,13 @@ static void handle_pdu(srv_t *s, const ber_tlv *pdu)
         break;
     case F_WRITE_RQ:
         s->writing = 1;
+        s->pending_cr = 0;
         s->wf = fopen(s->path, "ab");
         break;
     case F_DATA_END_RQ:
         s->writing = 0;
+        if (s->wf && s->pending_cr)
+            fputc('\r', s->wf);                /* ended in a lone CR */
         if (s->wf)
             fclose(s->wf);
         s->wf = NULL;
@@ -777,14 +784,25 @@ static int item_cb(void *arg, int ctx, const ber_tlv *v)
         return 0;
     }
     if (s->writing && s->wf) {
-        buf_t str;
+        buf_t str, lf;
         buf_init(&str);
+        buf_init(&lf);
         ber_get_string(v, &str);
-        if (str.len)                /* empty line: data is NULL */
-            fwrite(str.data, 1, str.len, s->wf);
-        if (ctx == s->ctx_text)
+        /* strings that cannot hold control characters are one line each;
+         * the others carry CR LF line ends, stored as LF */
+        uint32_t t = v->tag & ~BER_TAG(0x20, 0);
+        int line = t == T_GRAPHIC || t == T_PRINTABLE || t == T_VISIBLE;
+        buf_t *out = &str;
+        if (ctx == s->ctx_text && !line) {
+            text_from_crlf(str.data, str.len, &lf, &s->pending_cr);
+            out = &lf;
+        }
+        if (out->len)               /* empty string: data is NULL */
+            fwrite(out->data, 1, out->len, s->wf);
+        if (ctx == s->ctx_text && line)
             fputc('\n', s->wf);
         buf_free(&str);
+        buf_free(&lf);
     }
     return 0;
 }

@@ -397,13 +397,16 @@ x25_tests() {
         -v --rej --window 7 get remote.bin "$WORK/rej2.bin"
     check "  content matches" cmp -s "$WORK/big.bin" "$WORK/rej2.bin"
     check "  client sent REJ" grep -q "send REJ" "$WORK/t$N.err"
+    # window 1: every packet is the last of its window, so the receiver
+    # never sees a gap and only the sender's T25 can recover the loss
     SKIP_TSHARK=1 FTAM_TEST_DROP=9 run "T25: last packet of window lost, recovered by timer" 0 \
-        --rej get remote.bin "$WORK/rej3.bin"
+        --rej --window 1 get remote.bin "$WORK/rej3.bin"
     check "  content matches" cmp -s "$WORK/big.bin" "$WORK/rej3.bin"
     check "  responder T25 retransmission" grep -q "T25 expired" "$WORK/ftamd.log"
     start_server
+    # window 7: packets keep coming after the lost one, so the gap is seen
     SKIP_TSHARK=1 FTAM_TEST_DROP=20 run "without REJ a lost packet resets the call" 1 \
-        get remote.bin "$WORK/rej4.bin"
+        --window 7 get remote.bin "$WORK/rej4.bin"
     check "  reported as out of sequence" grep -q "out of sequence" "$WORK/t$N.err"
 
     # ---- X.25: Q-bit, RNR ---------------------------------------------------------

@@ -47,3 +47,34 @@ jobs:
           name: test-artifacts-${{ strategy.job-index }}
           path: ${{ runner.temp }}/ftamtest.*
           if-no-files-found: ignore
+
+  isode-interop:
+    name: ISODE interop
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install tshark
+        run: |
+          echo "wireshark-common wireshark-common/install-setuid boolean false" |
+            sudo debconf-set-selections
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y tshark
+
+      - name: Build
+        run: make
+
+      - name: Build ISODE (FTAM responder from source)
+        run: docker build -t telexfer-isode interop/isode
+
+      - name: Test against ISODE
+        # on failure the script keeps its work directory (pcaps, logs) there
+        run: TMPDIR="$RUNNER_TEMP" ./tests/isode-interop.sh
+
+      - name: Keep test artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: isode-interop-artifacts
+          path: ${{ runner.temp }}/isodetest.*
+          if-no-files-found: ignore

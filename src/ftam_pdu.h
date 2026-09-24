@@ -164,6 +164,13 @@ typedef struct {
  * entry type varies between implementations.  Returns 1 if found.
  */
 int  ftam_find_attributes(const ber_tlv *v, ber_tlv *attrs);
+/*
+ * Repair a GeneralizedTime from ISODE (and derivatives): its YEAR() macro
+ * leaves tm_year >= 100 untouched, so every year from 2000 on is sent as
+ * "01YY" ("0126" = 2026).  A four-digit year of 100..999 cannot be meant
+ * literally in a file time, so 1900 is added to it.
+ */
+void ftam_fix_gtime(char *gt);
 /* Extract name, type, size and modification time. */
 int  ftam_parse_dirent(const ber_tlv *attrs, ftam_dirent *e);
 

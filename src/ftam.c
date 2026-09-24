@@ -192,6 +192,31 @@ static int send_pdu(ftam_conn *fc, const buf_t *pdu)
     return rc;
 }
 
+/*
+ * Several FTAM PDUs in one P-DATA, one PDV-list each.  Grouped requests
+ * (F-BEGIN-GROUP ... F-END-GROUP) are sent this way: ISODE, for one,
+ * aborts a group that is spread over several P-DATAs.
+ */
+static int send_pdus(ftam_conn *fc, const buf_t *pdus, int n)
+{
+    buf_t   ud;
+    ber_enc e;
+    buf_init(&ud);
+    pres_ud_begin(&e, &ud);
+    for (int i = 0; i < n; i++) {
+        ber_rd  r;
+        ber_tlv t;
+        ber_rd_init(&r, pdus[i].data, pdus[i].len);
+        if (ber_next(&r, &t) > 0)
+            log_msg(LOG_INFO, L, "-> %s", ftam_pdu_name(T_TAGNUM(t.tag)));
+        pres_ud_pdv(&e, fc->ctx[CTX_PCI].id, pdus[i].data, pdus[i].len);
+    }
+    pres_ud_end(&e);
+    int rc = ses_send_data(&fc->ses, ud.data, ud.len);
+    buf_free(&ud);
+    return rc;
+}
+
 static int send_simple_pdu(ftam_conn *fc, unsigned tag)
 {
     buf_t   b;
@@ -365,19 +390,30 @@ static int run_group(ftam_conn *fc, buf_t *reqs, int n, group_res *gr)
     gr->err_id = -1;
 
     if (fc->fu & FU_GROUPING) {
-        buf_t   b;
+        /* the whole group in one P-DATA */
+        buf_t   all[8];
         ber_enc e;
-        buf_init(&b);
-        ber_enc_init(&e, &b);
+        int     k = 0;
+        if (n > 6) {
+            set_error("internal: group of %d requests", n);
+            return -2;
+        }
+        buf_init(&all[k]);
+        ber_enc_init(&e, &all[k]);
         ber_begin(&e, T_CTXC(F_BEGIN_GROUP_RQ));
         ber_int(&e, T_CTX(0), n);               /* threshold */
         ber_end(&e);
-        int rc = send_pdu(fc, &b);
-        buf_free(&b);
-        for (int i = 0; rc == 0 && i < n; i++)
-            rc = send_pdu(fc, &reqs[i]);
-        if (rc == 0)
-            rc = send_simple_pdu(fc, F_END_GROUP_RQ);
+        k++;
+        for (int i = 0; i < n; i++)
+            all[k++] = reqs[i];                 /* shallow: not freed here */
+        buf_init(&all[k]);
+        ber_enc_init(&e, &all[k]);
+        ber_begin(&e, T_CTXC(F_END_GROUP_RQ));
+        ber_end(&e);
+        k++;
+        int rc = send_pdus(fc, all, k);
+        buf_free(&all[0]);
+        buf_free(&all[k - 1]);
         if (rc < 0 || expect_pdu(fc, F_BEGIN_GROUP_RP, &h, &pdu) < 0)
             return -2;
         free(h);
@@ -739,10 +775,23 @@ typedef int (*data_fn)(void *arg, int ctx, const ber_tlv *value);
 typedef struct {
     FILE      *out;
     int        text;
-    long       significance;
     long long *bytes;
     buf_t      s;
+    buf_t      conv;            /* text: CR LF -> LF */
+    int        pending_cr;
 } file_sink;
+
+/*
+ * FTAM-1: whether a string carries its own line ends follows from its
+ * type.  GraphicString, PrintableString and VisibleString cannot contain
+ * control characters, so each one is a line; GeneralString, IA5String,
+ * T61String and VideotexString carry format effectors (CR, LF) inside.
+ * This is also how ISODE's responder reads and writes text files.
+ */
+static int is_line_string(uint32_t tag)
+{
+    return tag == T_GRAPHIC || tag == T_PRINTABLE || tag == T_VISIBLE;
+}
 
 static int write_value(void *arg, int ctx, const ber_tlv *v)
 {
@@ -754,20 +803,29 @@ static int write_value(void *arg, int ctx, const ber_tlv *v)
     }
     buf_reset(&fs->s);
     ber_get_string(v, &fs->s);
-    if (fs->s.len && fwrite(fs->s.data, 1, fs->s.len, fs->out) != fs->s.len) {
+    buf_t *data = &fs->s;
+    int    line = fs->text && is_line_string(v->tag & ~BER_TAG(0x20, 0));
+    if (fs->text && !line) {
+        /* line ends travel as CR LF: back to the local LF */
+        buf_reset(&fs->conv);
+        text_from_crlf(fs->s.data, fs->s.len, &fs->conv, &fs->pending_cr);
+        data = &fs->conv;
+    }
+    if (data->len && fwrite(data->data, 1, data->len, fs->out) != data->len) {
         set_error("local write error");
         return -1;
     }
-    *fs->bytes += (long long)fs->s.len;
-    if (fs->text && fs->significance != SS_NOT_SIGNIFICANT &&
-        (fs->s.len == 0 || fs->s.data[fs->s.len - 1] != '\n')) {
+    *fs->bytes += (long long)data->len;
+    if (line) {
         fputc('\n', fs->out);
         (*fs->bytes)++;
     }
     return 0;
 }
 
-static int read_transfer(ftam_conn *fc, int access_context, data_fn fn, void *arg)
+/* cancel_id (may be NULL): error-identifier of a responder's F-CANCEL */
+static int read_transfer(ftam_conn *fc, int access_context, data_fn fn, void *arg,
+                         long *cancel_id)
 {
     buf_t   b;
     item_q *h;
@@ -816,6 +874,8 @@ static int read_transfer(ftam_conn *fc, int access_context, data_fn fn, void *ar
         if (tag == F_CANCEL_RQ) {
             char d[1024];
             ftam_fmt_diagnostic(&pdu, d, sizeof d);
+            if (cancel_id)
+                *cancel_id = ftam_first_diag_id(&pdu);
             free(h);
             send_simple_pdu(fc, F_CANCEL_RP);
             set_error("transfer cancelled by responder%s%s", d[0] ? ": " : "", d);
@@ -880,8 +940,6 @@ static int write_transfer(ftam_conn *fc, FILE *in, int text, int op,
     ber_tlv pdu;
     int     ctx = fc->ctx[text ? CTX_TEXT : CTX_BIN].id;
     int     pending = 0;
-    char   *line = NULL;
-    size_t  linecap = 0;
     int     rc = 0;
 
     buf_init(&b);
@@ -891,21 +949,25 @@ static int write_transfer(ftam_conn *fc, FILE *in, int text, int op,
     if (rc < 0)
         return -2;
 
+    buf_t crlf;
+    int   prev = 0;
     buf_init(&ud);
     buf_init(&elem);
     buf_init(&vals);
+    buf_init(&crlf);
     uint8_t *chunk = xmalloc(fc->chunk_size);
     for (;;) {
         buf_reset(&elem);
         ber_enc_init(&ee, &elem);
         if (text) {
-            ssize_t n = getline(&line, &linecap, in);
-            if (n < 0)
+            /* GeneralString with the line ends inside, as CR LF */
+            size_t n = fread(chunk, 1, fc->chunk_size, in);
+            if (n == 0)
                 break;
-            *bytes += n;
-            while (n > 0 && (line[n - 1] == '\n' || line[n - 1] == '\r'))
-                n--;
-            ber_prim(&ee, T_GENERAL, line, (size_t)n);
+            *bytes += (long long)n;
+            buf_reset(&crlf);
+            text_to_crlf(chunk, n, &crlf, &prev);
+            ber_prim(&ee, T_GENERAL, crlf.data, crlf.len);
         } else {
             size_t n = fread(chunk, 1, fc->chunk_size, in);
             if (n == 0)
@@ -940,10 +1002,10 @@ static int write_transfer(ftam_conn *fc, FILE *in, int text, int op,
     if (rc == 0)
         rc = flush_octets(fc, ctx, &vals);
     free(chunk);
-    free(line);
     buf_free(&ud);
     buf_free(&elem);
     buf_free(&vals);
+    buf_free(&crlf);
     if (rc < 0)
         return -2;
     if (ferror(in)) {
@@ -1061,11 +1123,16 @@ int ftam_get(ftam_conn *fc, const char *remote, FILE *out, int doctype,
         return -1;
     }
 
-    file_sink fs = { .out = out, .text = ct.doctype == 1,
-                     .significance = ct.significance, .bytes = bytes };
+    file_sink fs = { .out = out, .text = ct.doctype == 1, .bytes = bytes };
     buf_init(&fs.s);
-    rc = read_transfer(fc, AC_UNSTRUCTURED_ALL, write_value, &fs);
+    buf_init(&fs.conv);
+    rc = read_transfer(fc, AC_UNSTRUCTURED_ALL, write_value, &fs, NULL);
+    if (fs.pending_cr) {                        /* the file ended in a lone CR */
+        fputc('\r', out);
+        (*bytes)++;
+    }
     buf_free(&fs.s);
+    buf_free(&fs.conv);
     if (rc == -2)
         return -1;
     char saved[1024];
@@ -1093,8 +1160,9 @@ int ftam_put(ftam_conn *fc, FILE *in, const char *remote, int doctype,
     if (!data_ctx_ok(fc, doctype))
         return -1;
     if (doctype == 1) {
-        ct.universal_class = 27;                /* GeneralString */
-        ct.significance = SS_VARIABLE;          /* one string per line */
+        /* GeneralString, line ends in the data: what ISODE uses too */
+        ct.universal_class = 27;
+        ct.significance = SS_NOT_SIGNIFICANT;
     } else {
         ct.significance = SS_NOT_SIGNIFICANT;
     }
@@ -1358,8 +1426,17 @@ static int list_nbs9(ftam_conn *fc, const char *dir, dirent_list *l)
         deselect(fc);
         return -1;
     }
-    /* the directory is a flat file of one data element per entry */
-    rc = read_transfer(fc, AC_FLAT_ALL, nbs9_value, l);
+    /* One data element per entry.  ISODE, the reference for NBS-9, only
+     * reads directories with unstructured-all-data-units and cancels any
+     * other access context (5025); the textbook one for a sequential flat
+     * file is flat-all-data-units, tried if UA is refused. */
+    long cancel_id = -1;
+    rc = read_transfer(fc, AC_UNSTRUCTURED_ALL, nbs9_value, l, &cancel_id);
+    if (rc == -1 && cancel_id == 5025) {
+        log_msg(LOG_INFO, L, "access context UA refused, reading with FA");
+        l->n = 0;
+        rc = read_transfer(fc, AC_FLAT_ALL, nbs9_value, l, NULL);
+    }
     if (rc == -2)
         return -1;
     char saved[1024];
@@ -1454,6 +1531,18 @@ int ftam_list(ftam_conn *fc, const char *dir, int method, int long_format, FILE 
     log_msg(LOG_INFO, L, "listing %s with %s", dir ? dir : "current directory",
             method == LIST_FLIST ? "F-LIST" : "NBS-9");
     rc = method == LIST_FLIST ? list_flist(fc, dir, &l) : list_nbs9(fc, dir, &l);
+    if (rc == 0 && dir && dir[0] && strcmp(dir, ".") != 0) {
+        /* some responders (ISODE) name entries by their path from the
+         * home directory: show them relative to the directory listed */
+        size_t dl = strlen(dir);
+        while (dl > 1 && dir[dl - 1] == '/')
+            dl--;
+        for (size_t i = 0; i < l.n; i++) {
+            char *nm = l.v[i].name;
+            if (strncmp(nm, dir, dl) == 0 && nm[dl] == '/' && nm[dl + 1])
+                memmove(nm, nm + dl + 1, strlen(nm + dl + 1) + 1);
+        }
+    }
     if (rc == 0) {
         qsort(l.v, l.n, sizeof *l.v, dirent_cmp);
         for (size_t i = 0; i < l.n; i++) {

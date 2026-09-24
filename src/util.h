@@ -44,6 +44,18 @@ void log_hex(int level, const char *layer, const char *what,
 void        set_error(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 const char *get_error(void);
 
+/* ---- text line ends ----------------------------------------------------- */
+
+/*
+ * FTAM-1 text travels with CR LF line ends (as ISODE sends and expects,
+ * like FTP's ASCII mode).  Both conversions work on a stream in pieces:
+ * the int carries state from one call to the next and starts at 0.
+ */
+/* LF -> CR LF (an existing CR LF is left alone) */
+void text_to_crlf(const uint8_t *in, size_t n, buf_t *out, int *prev);
+/* CR LF -> LF; a CR at the end of a piece waits for the next one */
+void text_from_crlf(const uint8_t *in, size_t n, buf_t *out, int *pending_cr);
+
 /* ---- parsers ----------------------------------------------------------- */
 
 /* Hex string ("0a1B2c", optional "0x" prefix, spaces/colons ignored). */
