@@ -35,6 +35,9 @@ static void usage(FILE *f)
 "                           1998) or, with RFC 1006, the responder (port 102)\n"
 "      --transport T        xot (default): TP0 over X.25 over TCP (RFC 1613)\n"
 "                           rfc1006: TP0 directly over TCP (RFC 1006)\n"
+"                           x25: TP0 over the Linux kernel's X.25 (AF_X25):\n"
+"                           no --host; -A/-a/--cud/--packet-size/--window\n"
+"                           go to the kernel, which routes the call\n"
 "\n"
 "X.25 (XOT only):\n"
 "  -A, --called X121        called DTE address\n"
@@ -224,7 +227,7 @@ static int enc_arg(const char *opt, const char *s)
     exit(2);
 }
 
-/* Options that only mean something for X.25, i.e. with XOT. */
+/* Options that only mean something for X.25 (XOT or the kernel's). */
 static const char *x25_only_opt(int c)
 {
     switch (c) {
@@ -233,6 +236,14 @@ static const char *x25_only_opt(int c)
     case O_CUD: return "--cud";
     case O_PKT: return "--packet-size";
     case O_WIN: return "--window";
+    default: return NULL;
+    }
+}
+
+/* Options of TELEXFER's own X.25 implementation, i.e. XOT only. */
+static const char *xot_only_opt(int c)
+{
+    switch (c) {
     case O_MOD128: return "--mod128";
     case O_LCN: return "--lcn";
     case O_REJ: return "--rej";
@@ -260,7 +271,7 @@ int main(int argc, char **argv)
                         .ack = ACK_NONE, .ack_rename = "%s.DONE",
                         .closed = CLOSED_NEXT, .lookahead = 3 };
     char      range_arg[64] = "";
-    const char *x25_opt = NULL;
+    const char *x25_opt = NULL, *xot_opt = NULL;
     char     *hostarg = NULL;
 
     ftam_opts_default(&o);
@@ -269,7 +280,7 @@ int main(int argc, char **argv)
     if (getenv("FTAM_TEST_DROP"))
         o.test_drop = atoi(getenv("FTAM_TEST_DROP"));
     if (o.test_drop)
-        x25_opt = "FTAM_TEST_DROP";
+        xot_opt = "FTAM_TEST_DROP";
     /* test hook: pad the F-INITIALIZE so connect data needs OA/CDO */
     if (getenv("FTAM_TEST_PAD"))
         o.impl_pad = (size_t)atoi(getenv("FTAM_TEST_PAD"));
@@ -277,6 +288,12 @@ int main(int argc, char **argv)
     while ((c = getopt_long(argc, argv, "H:A:a:u:p:btfvh", longopts, NULL)) != -1) {
         if (x25_only_opt(c))
             x25_opt = x25_only_opt(c);
+        if (xot_only_opt(c))
+            xot_opt = xot_only_opt(c);
+        if (c == O_PKT)
+            o.x25_pkt_given = 1;
+        if (c == O_WIN)
+            o.x25_win_given = 1;
         switch (c) {
         case 'H': hostarg = optarg; break;
         case O_CNAME: co.name_fmt = optarg; break;
@@ -309,8 +326,10 @@ int main(int argc, char **argv)
                 o.transport = TRANSPORT_XOT;
             else if (strcmp(optarg, "rfc1006") == 0)
                 o.transport = TRANSPORT_RFC1006;
+            else if (strcmp(optarg, "x25") == 0)
+                o.transport = TRANSPORT_X25;
             else {
-                fprintf(stderr, "ftam: --transport must be xot or rfc1006\n");
+                fprintf(stderr, "ftam: --transport must be xot, rfc1006 or x25\n");
                 return 2;
             }
             break;
@@ -417,7 +436,7 @@ int main(int argc, char **argv)
         usage(stderr);
         return 2;
     }
-    if (!hostarg) {
+    if (!hostarg && o.transport != TRANSPORT_X25) {
         fprintf(stderr, "ftam: --host is required\n");
         return 2;
     }
@@ -425,10 +444,31 @@ int main(int argc, char **argv)
         fprintf(stderr, "ftam: --force and --append are mutually exclusive\n");
         return 2;
     }
-    if (o.transport == TRANSPORT_RFC1006 && x25_opt) {
+    if (o.transport == TRANSPORT_RFC1006 && (x25_opt || xot_opt)) {
         fprintf(stderr, "ftam: %s is an X.25 option; it has no meaning with "
-                        "--transport rfc1006\n", x25_opt);
+                        "--transport rfc1006\n", x25_opt ? x25_opt : xot_opt);
         return 2;
+    }
+    if (o.transport == TRANSPORT_X25) {
+        if (xot_opt) {
+            fprintf(stderr, "ftam: %s belongs to TELEXFER's own X.25 (XOT); with "
+                            "--transport x25 the kernel runs X.25\n", xot_opt);
+            return 2;
+        }
+        if (hostarg) {
+            fprintf(stderr, "ftam: --host has no meaning with --transport x25 "
+                            "(the kernel routes by the called address, -A)\n");
+            return 2;
+        }
+        if (o.pcap_path) {
+            fprintf(stderr, "ftam: --pcap is not available with --transport x25 "
+                            "(capture on the X.25 interface instead)\n");
+            return 2;
+        }
+        if (!o.x25.called || !o.x25.called[0]) {
+            fprintf(stderr, "ftam: --transport x25 needs the called address (-A)\n");
+            return 2;
+        }
     }
     if (o.transport == TRANSPORT_XOT && o.tpdu_size > 2048) {
         /* class 0 over X.25 is limited to 2048 (ISO 8073); RFC 1006
@@ -438,7 +478,7 @@ int main(int argc, char **argv)
     }
     /* HOST[:PORT], IPv6 as [addr]:port */
     static char hostbuf[256];
-    snprintf(hostbuf, sizeof hostbuf, "%s", hostarg);
+    snprintf(hostbuf, sizeof hostbuf, "%s", hostarg ? hostarg : "");
     o.host = hostbuf;
     char *colon = strrchr(hostbuf, ':');
     if (hostbuf[0] == '[') {

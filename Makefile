@@ -6,7 +6,7 @@ override CFLAGS += -std=c11 -D_DEFAULT_SOURCE -D_DARWIN_C_SOURCE -D_POSIX_C_SOUR
            -Wall -Wextra -Wshadow -Wno-unused-parameter
 LDFLAGS ?=
 
-LIB_SRCS = src/util.c src/ber.c src/trace.c src/tcp.c src/x25.c src/rfc1006.c \
+LIB_SRCS = src/util.c src/ber.c src/trace.c src/tcp.c src/x25.c src/x25linux.c src/rfc1006.c \
            src/tp0.c src/session.c src/pres.c src/ftam_pdu.c src/sha256.c
 LIB_OBJS = $(LIB_SRCS:.c=.o)
 
@@ -19,6 +19,10 @@ ftam: $(LIB_OBJS) src/ftam.o src/collect.o src/main.o
 ftamd: $(LIB_OBJS) tests/ftamd.o
 	$(CC) $(LDFLAGS) -o $@ $^
 
+# kernel X.25 route helper for tests/kernel-x25.sh (Linux)
+x25route: $(LIB_OBJS) tests/x25route.o
+	$(CC) $(LDFLAGS) -o $@ $^
+
 src/%.o: src/%.c src/*.h
 	$(CC) $(CFLAGS) -c -o $@ $<
 
@@ -29,6 +33,6 @@ test: all
 	./tests/run.sh
 
 clean:
-	rm -f ftam ftamd src/*.o tests/*.o
+	rm -f ftam ftamd x25route src/*.o tests/*.o
 
 .PHONY: all test clean

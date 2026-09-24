@@ -78,3 +78,34 @@ jobs:
           name: isode-interop-artifacts
           path: ${{ runner.temp }}/isodetest.*
           if-no-files-found: ignore
+
+  kernel-x25:
+    name: Linux kernel X.25
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Kernel X.25 modules and tshark
+        run: |
+          echo "wireshark-common wireshark-common/install-setuid boolean false" |
+            sudo debconf-set-selections
+          sudo apt-get update
+          # lapbether (LAPB over Ethernet) is in linux-modules-extra
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y tshark \
+            "linux-modules-extra-$(uname -r)" || true
+          uname -r
+          sudo modprobe -v x25 lapb lapbether && lsmod | grep -E 'x25|lapb'
+
+      - name: Build
+        run: make all x25route
+
+      - name: FTAM over kernel X.25 (LAPB over Ethernet on a veth pair)
+        run: sudo TMPDIR="$RUNNER_TEMP" ./tests/kernel-x25.sh
+
+      - name: Keep test artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-x25-artifacts
+          path: ${{ runner.temp }}/kx25test.*
+          if-no-files-found: ignore

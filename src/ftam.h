@@ -12,12 +12,13 @@
 #include "rfc1006.h"
 #include "session.h"
 #include "x25.h"
+#include "x25linux.h"
 
 /* network service under TP0 */
-enum { TRANSPORT_XOT = 0, TRANSPORT_RFC1006 };
+enum { TRANSPORT_XOT = 0, TRANSPORT_RFC1006, TRANSPORT_X25 };
 
 typedef struct {
-    int         transport;          /* TRANSPORT_XOT or TRANSPORT_RFC1006 */
+    int         transport;          /* TRANSPORT_XOT, _RFC1006 or _X25 (kernel) */
     const char *host;
     int         port;
     /* X.25 (XOT only) */
@@ -47,6 +48,8 @@ typedef struct {
     int         tsdu_size;          /* session segmenting: TSDU max, 0 = off */
     int         ext_concat;         /* announce extended concatenation */
     int         propose_v2;         /* offer FTAM protocol version 2 (F-LIST) */
+    int         x25_pkt_given;      /* --packet-size / --window were given */
+    int         x25_win_given;
     size_t      impl_pad;           /* test hook: grow the connect user data */
     uint8_t     interrupt_data[X25_MAX_INT_DATA];
     size_t      interrupt_len;      /* send an X.25 interrupt after call setup */
@@ -73,6 +76,7 @@ typedef struct {
     int         tracing;
     x25_vc      vc;                 /* TRANSPORT_XOT */
     tpkt_conn   tpkt;               /* TRANSPORT_RFC1006 */
+    kx25_conn   kx25;               /* TRANSPORT_X25 */
     tp0_conn    tc;
     ses_conn    ses;
     pctx_t      ctx[CTX_COUNT];

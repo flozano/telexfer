@@ -584,6 +584,7 @@ int ftam_connect(ftam_conn *fc, const ftam_opts *o)
     fc->fd = -1;
     fc->vc.fd = -1;
     fc->tpkt.fd = -1;
+    fc->kx25.fd = -1;
     fc->chunk_size = o->chunk_size ? o->chunk_size : 4096;
     fc->ctx[CTX_ACSE] = (pctx_t){ 1, OID_ACSE_AS, -1 };
     fc->ctx[CTX_PCI] = (pctx_t){ 3, OID_FTAM_PCI, -1 };
@@ -591,6 +592,22 @@ int ftam_connect(ftam_conn *fc, const ftam_opts *o)
     fc->ctx[CTX_BIN] = (pctx_t){ 7, OID_FTAM_UNSTR_BIN, -1 };
     fc->ctx[CTX_NBS9] = (pctx_t){ 9, OID_NBS9_AS, -1 };
 
+    net_conn net;
+    if (o->transport == TRANSPORT_X25) {
+        /* the kernel's X.25: no TCP, no pcap (the kernel owns the packets) */
+        kx25_params kp = { .called = o->x25.called, .calling = o->x25.calling,
+                           .cud = o->x25.cud, .cud_len = o->x25.cud_len,
+                           .pkt_size = o->x25_pkt_given ? o->x25.pkt_size : 0,
+                           .window = o->x25_win_given ? o->x25.window : 0 };
+        fc->pdv_mode = o->pdv_mode;
+        acse_set_user_encoding(o->acse_encoding);
+        pres_set_segment(o->pdv_segment);
+        if (kx25_connect(&fc->kx25, &kp, o->timeout_ms) < 0)
+            return -1;
+        net = kx25_net(&fc->kx25);
+        log_msg(LOG_INFO, L, "transport: kernel X.25 (AF_X25)");
+        goto transport_up;
+    }
     fc->fd = tcp_connect(o->host, o->port, o->timeout_ms);
     if (fc->fd < 0)
         return -1;
@@ -612,7 +629,6 @@ int ftam_connect(ftam_conn *fc, const ftam_opts *o)
         else
             log_msg(LOG_ERROR, L, "cannot open pcap file %s", o->pcap_path);
     }
-    net_conn net;
     if (o->transport == TRANSPORT_RFC1006) {
         /* no network connection establishment: TCP is up, TP0 goes next */
         tpkt_init(&fc->tpkt, fc->fd, o->timeout_ms, fc->tracing ? &fc->trace : NULL);
@@ -634,6 +650,7 @@ int ftam_connect(ftam_conn *fc, const ftam_opts *o)
             goto fail;
     }
 
+transport_up:
     if (tp0_connect(&fc->tc, net, o->tsel_calling, o->tsel_calling_len,
                     o->tsel_called, o->tsel_called_len, o->tpdu_size) < 0)
         goto fail;
@@ -1691,6 +1708,7 @@ void ftam_close(ftam_conn *fc)
     if (fc->vc.fd >= 0 || fc->vc.state != X25_IDLE)
         x25_close(&fc->vc);
     tpkt_close(&fc->tpkt);
+    kx25_close(&fc->kx25);
     if (fc->fd >= 0)
         close(fc->fd);
     fc->fd = -1;

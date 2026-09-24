@@ -23,12 +23,14 @@
 #include "rfc1006.h"
 #include "session.h"
 #include "x25.h"
+#include "x25linux.h"
 
 static const char *L = "srv";
 
 typedef struct {
     x25_vc    vc;               /* XOT */
     tpkt_conn tpkt;             /* RFC 1006 (-t rfc1006) */
+    kx25_conn kx25;             /* kernel X.25 (-t x25) */
     tp0_conn  tc;
     ses_conn  ses;
     const char *dir;
@@ -73,6 +75,8 @@ typedef struct {
     int         no_v2;          /* -L */
     int         no_storage;     /* -G */
     int         rfc1006;        /* -t rfc1006 */
+    int         kx25;           /* -t x25 */
+    const char *x25_local;      /* -x: X.121 address to listen on */
     int         acse_encoding;  /* -E octet|arbitrary */
     size_t      segment;        /* -S */
     uint8_t     intr[X25_MAX_INT_DATA];
@@ -939,9 +943,17 @@ static void serve(int fd, const char *dir, const char *password, const char *pca
     buf_init(&s.octets);
     s.vc.fd = -1;
     s.tpkt.fd = -1;
+    s.kx25.fd = -1;
     if (pcap && trace_open(&tr, pcap, so->rfc1006 ? RFC1006_PORT : XOT_PORT, 40000) == 0)
         tracing = 1;
     net_conn net;
+    if (so->kx25) {
+        /* fd is an accepted AF_X25 call: the kernel did the call set-up */
+        s.kx25.fd = fd;
+        s.kx25.timeout_ms = 30000;
+        net = kx25_net(&s.kx25);
+        goto transport;
+    }
     if (so->rfc1006) {
         tpkt_init(&s.tpkt, fd, 30000, tracing ? &tr : NULL);
         net = tpkt_net(&s.tpkt);
@@ -1039,7 +1051,9 @@ done:
     buf_free(&s.out);
     buf_free(&s.octets);
     ses_free(&s.ses);
-    if (so->rfc1006)
+    if (so->kx25)
+        kx25_close(&s.kx25);
+    else if (so->rfc1006)
         tpkt_close(&s.tpkt);
     else
         x25_close(&s.vc);
@@ -1054,7 +1068,7 @@ int main(int argc, char **argv)
     srv_opts    so;
 
     memset(&so, 0, sizeof so);
-    while ((c = getopt(argc, argv, "p:d:P:w:b:1vs:RD:OI:T:AE:S:N:B:Q:XLt:G")) != -1) {
+    while ((c = getopt(argc, argv, "p:d:P:w:b:1vs:RD:OI:T:AE:S:N:B:Q:XLt:Gx:")) != -1) {
         switch (c) {
         case 'p': port = atoi(optarg); break;
         case 'd': dir = optarg; break;
@@ -1076,11 +1090,14 @@ int main(int argc, char **argv)
         case 'X': so.ext_concat = 1; break;
         case 'L': so.no_v2 = 1; break;
         case 'G': so.no_storage = 1; break;
+        case 'x': so.x25_local = optarg; break;
         case 't':
             if (strcmp(optarg, "rfc1006") == 0)
                 so.rfc1006 = 1;
+            else if (strcmp(optarg, "x25") == 0)
+                so.kx25 = 1;
             else if (strcmp(optarg, "xot") != 0) {
-                fprintf(stderr, "ftamd: -t must be xot or rfc1006\n");
+                fprintf(stderr, "ftamd: -t must be xot, rfc1006 or x25\n");
                 return 2;
             }
             break;
@@ -1115,7 +1132,9 @@ int main(int argc, char **argv)
 "  -N MS  send RNR after the call and stay not ready for MS ms\n"
 "  -B N   send RNR when more than N received octets are queued\n"
 "  -Q HEX send a qualified (Q-bit) NSDU after the call\n"
-"  -t T   transport: xot (default) or rfc1006 (TPKT over TCP); the\n"
+"  -x A   with -t x25: the X.121 address to listen on (kernel X.25)\n"
+"  -t T   transport: xot (default), rfc1006 (TPKT over TCP) or x25\n"
+"         (the Linux kernel's X.25, AF_X25); the\n"
 "         X.25 options (-R -D -T -N -B -Q -I) only apply to xot\n"
 "  -L     FTAM version 1 only: no F-LIST, directories via NBS-9\n"
 "  -G     refuse the storage attribute group (no sizes or times)\n"
@@ -1130,12 +1149,20 @@ int main(int argc, char **argv)
         }
     }
     signal(SIGPIPE, SIG_IGN);
-    int lfd = tcp_listen(bind_addr, port);
+    if (so.kx25 && !so.x25_local) {
+        fprintf(stderr, "ftamd: -t x25 needs -x with the X.121 address to listen on\n");
+        return 2;
+    }
+    int lfd = so.kx25 ? kx25_listen(so.x25_local) : tcp_listen(bind_addr, port);
     if (lfd < 0) {
         fprintf(stderr, "ftamd: %s\n", get_error());
         return 1;
     }
-    log_msg(LOG_INFO, L, "listening on %s:%d, serving %s", bind_addr, port, dir);
+    if (so.kx25)
+        log_msg(LOG_INFO, L, "listening on X.25 address %s (kernel), serving %s",
+                so.x25_local, dir);
+    else
+        log_msg(LOG_INFO, L, "listening on %s:%d, serving %s", bind_addr, port, dir);
     do {
         int fd = accept(lfd, NULL, NULL);
         if (fd < 0) {

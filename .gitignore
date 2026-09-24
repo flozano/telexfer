@@ -3,3 +3,4 @@ ftamd
 *.o
 *.pcap
 *.dSYM/
+x25route
