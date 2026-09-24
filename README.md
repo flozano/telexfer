@@ -13,7 +13,7 @@
 The binaries are `ftam` (client) and `ftamd` (test responder).
 
 A dependency-free C11 implementation of an ISO 8571 FTAM initiator. It talks
-to an OSI responder in one of two ways:
+to an OSI responder in one of three ways:
 
 - over X.25 carried over TCP (XOT, RFC 1613), for partners on an X.25
   network behind a router
@@ -36,6 +36,18 @@ library.
 | ...or        | RFC 1006: TPKT over TCP, port 102 | `src/rfc1006.c` |
 | TCP          | connect/listen, deadline I/O | `src/tcp.c`       |
 | ASN.1        | BER (X.690)                  | `src/ber.c`       |
+
+## Background
+
+TELEXFER is a for-fun project with a real itch behind it. In the 2000s,
+collecting billing (CDR) files from a Lucent 5ESS meant relying on an
+obscure, closed FTAM client for SPARC. It spoke X.25 over XOT to a Cisco
+2500, and it segfaulted often. This is the client that should have
+existed: open, small, and tested layer by layer. There is no 5ESS to test
+against any more, so the proofs are the protocol dissectors in tshark and
+ISODE, an independent implementation (see [Interoperability:
+ISODE](#interoperability-isode)). Along the way, the testing turned up
+three bugs in ISODE itself, sent upstream as pull requests.
 
 ## Build
 
@@ -440,22 +452,37 @@ above under protocol behaviour:
 - the NBS-9 parameter tag and entry wrapper
 - the NBS-9 access context
 
-**ISODE bugs found along the way:**
-- **`tsapd` no longer compiles at the pinned commit.** Upstream commit
+**ISODE bugs found along the way.** The first three came out of the
+interop suite, and we sent fixes upstream:
+- **Years from 2000 on are sent as `01YY`** ([Wildboar-Software/isode#15]).
+  A `YEAR()` macro left `tm_year` (years since 1900) unconverted once it
+  reached 100, so 2026 became `0126` in every GeneralizedTime, UTCTime
+  was malformed, and `gtime()` returned 1970-era seconds (which Quipu uses
+  for cache ages and timeouts). We noticed it in F-READ-ATTRIB dates.
+  TELEXFER still repairs a four-digit year of 100–999 by adding 1900, for
+  responders that don't have the fix; it matters for `collect`'s ordering.
+- **`ftamd -d` crashes on data values of 4095 octets or more**
+  ([Wildboar-Software/isode#16]). The PDU tracer formatted into a fixed
+  8 KB stack buffer, and an n-octet value prints as 2n + 3 characters. We
+  hit it while turning on tracing to debug our own encoder. The interop
+  setup runs without `-d` (`FTAMD_DEBUG=1` turns it on).
+- **Some filenames are garbled inside ISODE** ([Wildboar-Software/isode#17]).
+  ISODE's home directory ends in `/`, so every relative name becomes
+  `home//name`, and the path cleaner removes the `//` with an overlapping
+  `strcpy()`, which glibc garbles depending on length. It showed up as
+  `collect --ack rename` failing with ENOENT for some directory names only
+  (`ack-rename/AMA0002` → `ack-rename/AMA0002.DONE`); sweeping name lengths
+  then found renames that "succeeded" under a different name, and reads of
+  existing files that failed. The test uses names that work.
+- **`tsapd` doesn't compile at the pinned commit.** Upstream commit
   `43aaabae` declares `ssapd` as a function pointer but defines a function.
-  The Dockerfile patches the two declarations back.
-- **Years from 2000 on are sent as `01YY`.** A `YEAR()` macro leaves
-  `tm_year` (years since 1900) unconverted once it reaches 100, so 2026
-  becomes `0126`. TELEXFER repairs a four-digit year of 100–999 by adding
-  1900, which matters for `collect`'s ordering.
-- **`ftamd -d` crashes on data values of 4096 octets or more,** in its debug
-  hex dump. The interop setup runs without `-d` (`FTAMD_DEBUG=1` turns it
-  on).
-- **Some renames fail with ENOENT inside ISODE.** For example,
-  `copyofack/AMA0002` → `copyofack/AMA0002.DONE` fails, while
-  `LLLLLLLLL/AMA0002` → `LLLLLLLLL/AMA0002.DONE` works. It depends on the
-  names and not on the files, and the request is identical in form. This
-  isn't characterised further; the test uses names that work.
+  The Dockerfile patches the two declarations back; the maintainer's own
+  [Wildboar-Software/isode#13] fixes it upstream.
+
+[Wildboar-Software/isode#13]: https://github.com/Wildboar-Software/isode/pull/13
+[Wildboar-Software/isode#15]: https://github.com/Wildboar-Software/isode/pull/15
+[Wildboar-Software/isode#16]: https://github.com/Wildboar-Software/isode/pull/16
+[Wildboar-Software/isode#17]: https://github.com/Wildboar-Software/isode/pull/17
 
 ## Limitations
 
