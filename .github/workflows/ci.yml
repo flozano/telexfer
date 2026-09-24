@@ -85,16 +85,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Kernel X.25 modules and tshark
+      - name: Kernel X.25 modules
         run: |
-          echo "wireshark-common wireshark-common/install-setuid boolean false" |
-            sudo debconf-set-selections
           for i in 1 2 3; do sudo apt-get -o Acquire::Retries=3 update && break; sleep 10; done
           # lapbether (LAPB over Ethernet) is in linux-modules-extra
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y tshark \
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
             "linux-modules-extra-$(uname -r)" || true
           uname -r
-          sudo modprobe -v x25 lapb lapbether && lsmod | grep -E 'x25|lapb'
+          for m in x25 lapb lapbether; do sudo modprobe -v "$m"; done
+          lsmod | grep -E 'x25|lapb'
 
       - name: Build
         run: make all x25route

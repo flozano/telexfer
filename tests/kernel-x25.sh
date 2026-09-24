@@ -21,11 +21,9 @@ SRV=$WORK/srv
 PASS=0
 FAIL=0
 SRVPID=
-CAPPID=
 
 cleanup() {
     [ -n "$SRVPID" ] && kill "$SRVPID" 2>/dev/null
-    [ -n "$CAPPID" ] && kill "$CAPPID" 2>/dev/null
     wait 2>/dev/null
     ip link del txv0 2>/dev/null
     if [ $FAIL -eq 0 ]; then
@@ -72,17 +70,10 @@ echo "LAPB over Ethernet: $L0 (txv0) <-> $L1 (txv1)"
 # calls to the server's address leave through the client's side
 ./x25route "$SERVER" 8 "$L0" || exit 1
 
-counters() { for d in txv0 txv1 "$L0" "$L1"; do
-    printf '%s rx=%s tx=%s  ' "$d" "$(cat /sys/class/net/$d/statistics/rx_packets)" \
-        "$(cat /sys/class/net/$d/statistics/tx_packets)"; done; echo; }
-echo "before: $(counters)"
-if command -v tshark >/dev/null; then
-    tshark -q -i any -w "$WORK/any.pcapng" >"$WORK/tshark-any.log" 2>&1 &
-    CAPANY=$!
-    tshark -q -i txv0 -w "$WORK/txv0.pcapng" >"$WORK/tshark.log" 2>&1 &
-    CAPPID=$!
-    sleep 1
-fi
+# frames actually crossing the LAPB link, as proof that nothing short-cuts
+txpackets() { cat "/sys/class/net/$1/statistics/tx_packets"; }
+L0_BEFORE=$(txpackets "$L0")
+L1_BEFORE=$(txpackets "$L1")
 
 mkdir -p "$SRV"
 head -c 200000 /dev/urandom >"$WORK/big.bin"
@@ -147,24 +138,13 @@ for i in 1 2 3; do printf "rec$i" >"$SRV/AMA/F$i"; touch -t 20260101000$i "$SRV/
 run "collect" 0 collect --name AMA/F%d --seq-range 1-9 --dest "$WORK/coll" --start 1
 check "  1 and 2 collected" bash -c "[ \$(grep -c '^collected ' '$WORK/t$N.out') = 2 ]"
 
-echo "after:  $(counters)"
-echo "--- /proc/net/x25/route"; cat /proc/net/x25/route 2>/dev/null
-echo "--- /proc/net/x25/neigh"; cat /proc/net/x25/neigh 2>/dev/null
-if [ -n "$CAPPID" ]; then
-    sleep 1
-    kill "$CAPPID" "$CAPANY" 2>/dev/null
-    wait "$CAPPID" "$CAPANY" 2>/dev/null
-    CAPPID=
-    echo "--- capture on all interfaces, by interface and protocol:"
-    tshark -r "$WORK/any.pcapng" -T fields -e sll.ifindex -e frame.protocols 2>/dev/null |
-        sort | uniq -c | sort -rn | head -8
-    ip -o link | awk '{print $1, $2}' | grep -E "txv|lapb" 
-    echo "capture: $(tshark -r "$WORK/txv0.pcapng" 2>/dev/null | wc -l) frames" \
-         "($(tail -1 "$WORK/tshark.log" 2>/dev/null))"
-    tshark -r "$WORK/txv0.pcapng" 2>/dev/null | head -5
-    check "capture on txv0 has LAPB and X.25 frames" bash -c \
-        "tshark -r '$WORK/txv0.pcapng' 2>/dev/null | grep -Eq 'X\\.25|LAPB'"
-fi
+# every exchange above went out as LAPB frames on both LAPB interfaces
+# (a capture would be nicer, but dumpcap records nothing on the CI runner)
+L0_SENT=$(( $(txpackets "$L0") - L0_BEFORE ))
+L1_SENT=$(( $(txpackets "$L1") - L1_BEFORE ))
+echo "LAPB frames sent: $L0 $L0_SENT, $L1 $L1_SENT"
+check "traffic crossed the LAPB link in both directions" \
+    test "$L0_SENT" -gt 1000 -a "$L1_SENT" -gt 1000
 
 echo
 echo "kernel X.25: $PASS passed, $FAIL failed"
