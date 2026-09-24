@@ -122,6 +122,8 @@ run "put text" 0 --text put "$WORK/lines.txt" lines.txt
 run "get text" 0 --text get lines.txt "$WORK/lines.back"
 check "  content matches" cmp -s "$WORK/lines.txt" "$WORK/lines.back"
 run "packet size 1024, window 7" 0 -v --packet-size 1024 --window 7 get remote.bin "$WORK/g2.bin"
+check "  negotiated by the kernel as asked" \
+    grep -q "CALL CONNECTED: packet size 1024/1024, window 7/7" "$WORK/t$N.err"
 check "  content matches" cmp -s "$WORK/big.bin" "$WORK/g2.bin"
 run "packet size 128, window 1, TPDU 128" 0 --packet-size 128 --window 1 --tpdu-size 128 \
     put "$WORK/big.bin" small.bin

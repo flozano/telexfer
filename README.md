@@ -1,4 +1,4 @@
-# TELEXFER — FTAM file transfer over X.25/XOT and RFC 1006
+# TELEXFER — FTAM file transfer over X.25 (XOT or Linux kernel) and RFC 1006
 
 ```
 #####  #####  #      #####  #   #  #####  #####  ####
@@ -17,6 +17,8 @@ to an OSI responder in one of two ways:
 
 - over X.25 carried over TCP (XOT, RFC 1613), for partners on an X.25
   network behind a router
+- over the Linux kernel's own X.25 (`AF_X25`), for X.25 lines attached to
+  the machine itself: a synchronous serial card, or LAPB over Ethernet
 - directly over TCP (RFC 1006, port 102), the usual way on IP networks
 
 It covers the whole stack; nothing comes from ISODE or any other OSI
@@ -30,6 +32,7 @@ library.
 | Session      | ISO 8327 / X.225 (kernel, duplex, v1/v2) | `src/session.c` |
 | Transport    | ISO 8073 / X.224 class 0     | `src/tp0.c`       |
 | Network      | X.25 PLP (ISO 8208), mod 8/128, over XOT (RFC 1613, TCP port 1998) | `src/x25.c` |
+| ...or        | the Linux kernel's X.25 (`AF_X25` sockets) | `src/x25linux.c` |
 | ...or        | RFC 1006: TPKT over TCP, port 102 | `src/rfc1006.c` |
 | TCP          | connect/listen, deadline I/O | `src/tcp.c`       |
 | ASN.1        | BER (X.690)                  | `src/ber.c`       |
@@ -40,6 +43,7 @@ library.
 make            # builds ./ftam (client) and ./ftamd (test responder)
 make test       # end-to-end test suite (uses tshark if installed)
 tests/isode-interop.sh   # against ISODE's FTAM responder (needs Docker)
+sudo tests/kernel-x25.sh # over the Linux kernel's X.25 (Linux, root)
 ```
 
 ## Usage
@@ -68,9 +72,15 @@ ftam ... dir [DIR]                # ... with type, size, modification time
 Run `ftam --help` for every option. The ones you will usually need to match
 the responder's configuration are:
 
-- **Transport:** `--transport xot` (the default) or `rfc1006`. The default
-  port follows the transport: 1998 or 102. X.25-only options are refused
-  with `rfc1006` rather than silently ignored.
+- **Transport:** `--transport xot` (the default), `rfc1006` or `x25`. The
+  default port follows the transport: 1998 or 102. Options that don't apply
+  to the chosen transport are refused rather than silently ignored.
+  - **`x25` (Linux only):** the kernel's X.25. There's no `--host`; the
+    kernel routes the call by its called address (`-A`) through the X.25
+    route table. `-a`, `--cud`, `--packet-size` and `--window` go to the
+    kernel as call parameters. TELEXFER's own X.25 options (`--mod128`,
+    `--rej`, `--dbit`, …) don't apply, because the kernel runs X.25. Neither
+    does `--pcap`: capture on the X.25 interface instead.
 - **X.25:** `-A` called and `-a` calling X.121 addresses, `--packet-size`,
   `--window`, `--mod128`. The call user data defaults to `03010100` (the
   ISO/TR 9577 identifier for ISO 8073 transport). Override it with
@@ -361,6 +371,50 @@ which has the full FTAM version 2 grammar. That established:
 
 Real captures decode completely, down to the any-match filter and each
 entry's attributes.
+
+## The Linux kernel's X.25
+
+With `--transport x25`, the kernel runs the X.25 packet layer and the link
+below it: LAPB on a synchronous serial line, or LAPB over Ethernet with
+`lapbether`. TELEXFER runs TP0 and everything above on an `AF_X25` socket:
+
+- Each message is one complete packet sequence, i.e. one TPDU. It is sent
+  with `MSG_EOR`; the kernel refuses anything else.
+- Packet and window size, and call user data, are set on the socket before
+  the call.
+- A call the kernel clears is reported with its cause and diagnostic.
+
+**Setting it up.** The machine needs:
+- the modules: `x25`, `lapb`, and `lapbether` for LAPB over Ethernet (on
+  Ubuntu that one is in `linux-modules-extra`)
+- an X.25 interface that is up
+- a route for the called address. `x25route PREFIX DIGITS DEVICE` (built
+  with `make x25route`) adds one; for example `x25route 1111 4 lapb0` sends
+  calls to `1111…` through `lapb0`.
+
+`ftamd -t x25 -x ADDRESS` answers calls to `ADDRESS`.
+
+**Tested.** `tests/kernel-x25.sh`, in CI, runs on one Linux machine:
+- **The link:** a veth pair carries LAPB over Ethernet, and the kernel runs
+  X.25 at both ends. The client calls out through one LAPB interface;
+  `ftamd` answers behind the other. The two ends are both LAPB DTEs, which
+  the kernel's LAPB accepts.
+- **What it covers:** binary and text transfers, packet size and window
+  negotiation (1024/7, and 128/1 with 128-byte TPDUs), call user data,
+  attributes, a missing file, a call to an unknown address being cleared,
+  and `collect`.
+- **Proof it used the link:** a capture records nothing on the CI runner,
+  so the test compares the LAPB interfaces' frame counters before and
+  after. About 4,000 frames go each way, so nothing is short-cut inside the
+  kernel.
+
+**Kernel details worth knowing:**
+- `lapbether` creates a `lapbN` for every Ethernet interface that comes up,
+  and only in the host's own network namespace; the same goes for `AF_X25`.
+  So the test must run in the host namespace, and it finds its `lapbN` by
+  bringing each veth end up separately.
+- An incoming call is negotiated down to the *listening* socket's
+  facilities, so `ftamd` listens offering 4096/7.
 
 ## Interoperability: ISODE
 
