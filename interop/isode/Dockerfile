@@ -8,8 +8,9 @@ FROM ubuntu:24.04
 ARG ISODE_REPO=https://github.com/Wildboar-Software/isode.git
 ARG ISODE_COMMIT=0f29f178e30ede69cdb1f4da5db717e192c7e23e
 
-RUN apt-get update \
- && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+# retries: Ubuntu mirrors are occasionally caught mid-sync
+RUN for i in 1 2 3; do apt-get -o Acquire::Retries=3 update && break; sleep 10; done \
+ && DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
       build-essential git bison flex ca-certificates openssl iproute2 \
  && rm -rf /var/lib/apt/lists/*
 

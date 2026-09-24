@@ -29,7 +29,7 @@ jobs:
           # tshark decodes every test capture as an independent check
           echo "wireshark-common wireshark-common/install-setuid boolean false" |
             sudo debconf-set-selections
-          sudo apt-get update
+          for i in 1 2 3; do sudo apt-get -o Acquire::Retries=3 update && break; sleep 10; done
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y tshark netcat-openbsd
           tshark --version | head -1
 
@@ -58,7 +58,7 @@ jobs:
         run: |
           echo "wireshark-common wireshark-common/install-setuid boolean false" |
             sudo debconf-set-selections
-          sudo apt-get update
+          for i in 1 2 3; do sudo apt-get -o Acquire::Retries=3 update && break; sleep 10; done
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y tshark
 
       - name: Build
@@ -89,7 +89,7 @@ jobs:
         run: |
           echo "wireshark-common wireshark-common/install-setuid boolean false" |
             sudo debconf-set-selections
-          sudo apt-get update
+          for i in 1 2 3; do sudo apt-get -o Acquire::Retries=3 update && break; sleep 10; done
           # lapbether (LAPB over Ethernet) is in linux-modules-extra
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y tshark \
             "linux-modules-extra-$(uname -r)" || true

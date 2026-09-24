@@ -163,6 +163,15 @@ int kx25_listen(const char *local)
     struct x25_subaddr sub = { .cudmatchlength = 0 };  /* take any CUD */
     if (set_addr(&sa, local) < 0)
         goto fail;
+    /* an incoming call is negotiated down to the listening socket's
+     * facilities: offer the maxima so the caller's request stands */
+    struct x25_facilities fac;
+    if (ioctl(fd, SIOCX25GFACILITIES, &fac) == 0) {
+        fac.pacsize_in = fac.pacsize_out = X25_PS4096;
+        fac.winsize_in = fac.winsize_out = 7;
+        if (ioctl(fd, SIOCX25SFACILITIES, &fac) < 0)
+            log_msg(LOG_INFO, L, "listener facilities not set: %s", strerror(errno));
+    }
     if (ioctl(fd, SIOCX25SCUDMATCHLEN, &sub) < 0 ||
         bind(fd, (struct sockaddr *)&sa, sizeof sa) < 0 || listen(fd, 8) < 0) {
         set_error("X.25 listen on %s: %s", local, strerror(errno));
@@ -201,7 +210,9 @@ static int kx25_send(void *impl, const uint8_t *p, size_t n)
     for (;;) {
         if (wait_fd(k->fd, POLLOUT, k->timeout_ms) < 0)
             return -1;
-        ssize_t w = send(k->fd, p, n, 0);
+        /* MSG_EOR: the kernel refuses (EINVAL) sends that are not a
+         * complete record, i.e. a complete packet sequence */
+        ssize_t w = send(k->fd, p, n, MSG_EOR);
         if (w == (ssize_t)n)
             return 0;
         if (w < 0 && (errno == EINTR || errno == EAGAIN))
