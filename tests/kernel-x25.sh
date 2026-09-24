@@ -28,7 +28,13 @@ cleanup() {
     [ -n "$CAPPID" ] && kill "$CAPPID" 2>/dev/null
     wait 2>/dev/null
     ip link del txv0 2>/dev/null
-    if [ $FAIL -eq 0 ]; then rm -rf "$WORK"; else echo "artifacts kept in $WORK"; fi
+    if [ $FAIL -eq 0 ]; then
+        rm -rf "$WORK"
+    else
+        # run as root: let the (unprivileged) artifact upload read it
+        chmod -R a+rX "$WORK"
+        echo "artifacts kept in $WORK"
+    fi
 }
 trap cleanup EXIT
 
@@ -67,7 +73,7 @@ echo "LAPB over Ethernet: $L0 (txv0) <-> $L1 (txv1)"
 ./x25route "$SERVER" 8 "$L0" || exit 1
 
 if command -v tshark >/dev/null; then
-    tshark -q -i txv0 -w "$WORK/txv0.pcapng" >/dev/null 2>&1 &
+    tshark -q -i txv0 -w "$WORK/txv0.pcapng" >"$WORK/tshark.log" 2>&1 &
     CAPPID=$!
     sleep 1
 fi
@@ -140,6 +146,9 @@ if [ -n "$CAPPID" ]; then
     kill "$CAPPID" 2>/dev/null
     wait "$CAPPID" 2>/dev/null
     CAPPID=
+    echo "capture: $(tshark -r "$WORK/txv0.pcapng" 2>/dev/null | wc -l) frames" \
+         "($(tail -1 "$WORK/tshark.log" 2>/dev/null))"
+    tshark -r "$WORK/txv0.pcapng" 2>/dev/null | head -5
     check "capture on txv0 has LAPB and X.25 frames" bash -c \
         "tshark -r '$WORK/txv0.pcapng' 2>/dev/null | grep -Eq 'X\\.25|LAPB'"
 fi
